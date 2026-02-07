@@ -1,0 +1,51 @@
+name: Python Release
+
+on:
+  push:
+    tags:
+      - 'python/v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify tag matches pyproject.toml version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#python/v}"
+          FILE_VERSION=$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          p = Path('python-sdk/pyproject.toml').read_bytes()
+          print(tomllib.loads(p).get('project', {}).get('version', ''))
+          PY
+                    )
+          echo "Tag version: $TAG_VERSION"
+          echo "File version: $FILE_VERSION"
+          if [ -z "$FILE_VERSION" ] || [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
+            echo "Version mismatch between tag and pyproject.toml"
+            exit 1
+          fi
+
+      - name: Build
+        working-directory: python-sdk
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m build
+
+      - name: Publish to PyPI (gated)
+        if: vars.PYPI_PUBLISH == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: python-sdk/dist

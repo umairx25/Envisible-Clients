@@ -1,0 +1,23 @@
+{
+  "name": "envis-node",
+  "version": "0.0.1",
+  "description": "Secure, simple secret management",
+  "keywords": [
+    "secret",
+    "manager",
+    "encryption",
+    "secrets"
+  ],
+  "license": "ISC",
+  "author": "Umair Arham",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "node-fetch": "^2.7.0",
+    "open": "^8.4.2"
+  }
+}

@@ -1,0 +1,43 @@
+name: Node Release
+
+on:
+  push:
+    tags:
+      - 'node/v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#node/v}"
+          FILE_VERSION=$(node -p "require('./node-sdk/package.json').version")
+          echo "Tag version: $TAG_VERSION"
+          echo "File version: $FILE_VERSION"
+          if [ -z "$FILE_VERSION" ] || [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
+            echo "Version mismatch between tag and package.json"
+            exit 1
+          fi
+
+      - name: Install
+        working-directory: node-sdk
+        run: npm ci
+
+      - name: Publish to npm (gated)
+        if: vars.NPM_PUBLISH == 'true'
+        working-directory: node-sdk
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
