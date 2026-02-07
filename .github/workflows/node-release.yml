@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   build-and-publish:
@@ -38,6 +39,4 @@ jobs:
       - name: Publish to npm (gated)
         if: vars.NPM_PUBLISH == 'true'
         working-directory: node-sdk
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance

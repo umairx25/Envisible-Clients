@@ -15,6 +15,21 @@ Envisible is a simple, secure secret management platform. The CLI provides a ter
 
 ## Installation
 
+### Install via curl (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/umairx25/Envisible-Clients/main/cli/install.sh | bash
+```
+
+By default, this installs to `~/.local/bin`. You can override with `ENVIS_INSTALL_DIR`:
+
+```bash
+ENVIS_INSTALL_DIR=/usr/local/bin \
+  curl -fsSL https://raw.githubusercontent.com/umairx25/Envisible-Clients/main/cli/install.sh | bash
+```
+
+### Build from source
+
 ```bash
 cd cli
 go build -o envis .
@@ -29,7 +44,7 @@ mv ./envis /usr/local/bin/envis
 ## Usage
 
 1. Sign up for an Envisible account on the dashboard.
-2. Build the CLI and authenticate when prompted.
+2. Install the CLI and authenticate when prompted.
 3. Manage projects and secrets from your terminal:
 
 ### Log in
