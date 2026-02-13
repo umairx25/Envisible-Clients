@@ -26,7 +26,7 @@ def _get_env_url(var_name: str, default: str) -> str:
         return default
     return value.rstrip("/")
 
-BASE_URL = _get_env_url("ENVIS_API_URL", "https://envis.onrender.com")
+BASE_URL = _get_env_url("ENVIS_API_URL", "https://envis-api-518186320084.us-east4.run.app")
 FRONTEND_URL = _get_env_url("ENVIS_DASH_URL", "https://envisible.netlify.app")
 WAIT_TIME = 120
 POLL_DELAY_SECONDS = 5
