@@ -18,7 +18,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Verify tag matches package.json version
@@ -39,4 +39,6 @@ jobs:
       - name: Publish to npm (gated)
         if: vars.NPM_PUBLISH == 'true'
         working-directory: node-sdk
+        env:
+          NODE_AUTH_TOKEN: ""
         run: npm publish --provenance
