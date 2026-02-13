@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	defaultAPIURL       = "https://envis.onrender.com"
+	defaultAPIURL       = "https://envis-api-518186320084.us-east4.run.app"
 	defaultDashboardURL = "https://envisible.netlify.app"
 	pollWaitTimeout     = 120 * time.Second
 	defaultPollDelay    = 5 * time.Second
