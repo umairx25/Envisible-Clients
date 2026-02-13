@@ -25,7 +25,7 @@ jobs:
           FILE_VERSION=$(python - <<'PY'
           import tomllib
           from pathlib import Path
-          p = Path('python-sdk/envis/pyproject.toml').read_bytes()
+          p = Path('python-sdk/envis/pyproject.toml').read_text(encoding='utf-8')
           print(tomllib.loads(p).get('project', {}).get('version', ''))
           PY
                     )
