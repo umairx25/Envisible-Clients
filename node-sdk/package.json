@@ -10,6 +10,10 @@
   ],
   "license": "ISC",
   "author": "Umair Arham",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/umairx25/Envisible-Clients"
+  },
   "type": "commonjs",
   "main": "src/index.js",
   "scripts": {
