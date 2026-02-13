@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "envis"
-dynamic = ["version"]
+version = "0.0.7"
 description = 'Secure, simple, and powerful secret management.'
 readme = "README.md"
 requires-python = ">=3.8"
@@ -40,9 +40,6 @@ Homepage = "https://envisible.dev"
 Documentation = "https://github.com/umairx25/envis#readme"
 Issues = "https://github.com/umairx25/envis/issues"
 Source = "https://github.com/umairx25/envis"
-
-[tool.hatch.version]
-path = "src/envis/__about__.py"
 
 [tool.hatch.envs.types]
 extra-dependencies = [
