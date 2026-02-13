@@ -1,6 +1,6 @@
 {
   "name": "envis-node",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "description": "Secure, simple secret management",
   "keywords": [
     "secret",

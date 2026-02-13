@@ -30,7 +30,7 @@ function getEnvUrl(varName, fallback) {
 
 const BASE_URL = getEnvUrl(
   "ENVIS_API_URL",
-  "https://envis.onrender.com"
+  "https://envis-api-518186320084.us-east4.run.app"
 );
 
 const FRONTEND_URL = getEnvUrl(
