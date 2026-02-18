@@ -35,7 +35,7 @@ const BASE_URL = getEnvUrl(
 
 const FRONTEND_URL = getEnvUrl(
   "ENVIS_DASH_URL",
-  "https://envisible.netlify.app"
+  "https://envisible.dev"
 );
 
 async function pathExists(targetPath) {
