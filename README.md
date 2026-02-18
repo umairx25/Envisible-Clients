@@ -7,7 +7,7 @@
 ### Overview
 Client SDKs and CLI for Envisible, a secure secret management platform.
 
-- Website: [envisible.dev](https://envisible.dev)
+- Website and Docs: [envisible.dev](https://envisible.dev)
 - SDKs and CLI documentation:
   - [Python SDK](python-sdk/README.md)
   - [Node.js SDK](node-sdk/README.md)
@@ -21,10 +21,16 @@ Client SDKs and CLI for Envisible, a secure secret management platform.
    ```bash
    cd node-sdk
    npm install
+   npm link
    ```
 2. **Run locally**
    ```bash
-   node -e "const envis = require('./'); envis.get('project_id','secret_name').then(console.log)"
+   # In an arbitrary folder run (afterwards, use normally):
+   npm link envis-node
+   ```
+   ```bash
+   # To unlink the folder:
+   npm unlink envis-node
    ```
 
 #### CLI

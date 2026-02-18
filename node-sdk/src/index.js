@@ -1,4 +1,4 @@
-const { get, logout } = require("./main");
+const { get, getMany, getAll, logout } = require("./main");
 const {
   ensureSession,
   loadSession,
@@ -10,6 +10,8 @@ const {
 
 const envis = {
   get,
+  getMany,
+  getAll,
   logout,
   ensureSession,
   loadSession,
