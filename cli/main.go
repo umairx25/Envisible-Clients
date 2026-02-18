@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	defaultAPIURL       = "https://envis-api-518186320084.us-east4.run.app"
+	defaultAPIURL       = "https://api.envisible.dev"
 	defaultDashboardURL = "https://envisible.netlify.app"
 	pollWaitTimeout     = 120 * time.Second
 	defaultPollDelay    = 5 * time.Second
@@ -44,6 +44,16 @@ type Session struct {
 
 type SecretListResponse struct {
 	Secrets []string `json:"secrets"`
+}
+
+type SecretValue struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type SecretValuesResponse struct {
+	ProjectID string        `json:"project_id"`
+	Secrets   []SecretValue `json:"secrets"`
 }
 
 type Project struct {
@@ -81,6 +91,10 @@ type SecretGetResponse struct {
 
 type SecretUpsertRequest struct {
 	Value string `json:"value"`
+}
+
+type SecretsBatchRequest struct {
+	Names []string `json:"names"`
 }
 
 type CiTokenVerifyRequest struct {
@@ -257,27 +271,23 @@ func runPull(cfg Config, args []string) error {
 		return err
 	}
 
-	names, err := listSecretNames(client, cfg, projectID)
+	secrets, err := getAllSecrets(client, cfg, projectID)
 	if err != nil {
 		return err
 	}
 
-	sort.Strings(names)
-
-	values := make(map[string]string, len(names))
-	for _, name := range names {
-		v, err := getSecret(client, cfg, projectID, name)
-		if err != nil {
-			return fmt.Errorf("failed to fetch %q: %w", name, err)
-		}
-		values[name] = v
-	}
+	sort.Slice(secrets, func(i, j int) bool {
+		return secrets[i].Name < secrets[j].Name
+	})
 
 	var buf bytes.Buffer
-	for _, name := range names {
-		buf.WriteString(name)
+	for _, secret := range secrets {
+		if strings.TrimSpace(secret.Name) == "" {
+			continue
+		}
+		buf.WriteString(secret.Name)
 		buf.WriteString("=")
-		buf.WriteString(formatEnvValue(values[name]))
+		buf.WriteString(formatEnvValue(secret.Value))
 		buf.WriteString("\n")
 	}
 
@@ -285,7 +295,7 @@ func runPull(cfg Config, args []string) error {
 		return fmt.Errorf("failed to write %s: %w", *output, err)
 	}
 
-	fmt.Printf("Wrote %d secret(s) to %s\n", len(names), *output)
+	fmt.Printf("Wrote %d secret(s) to %s\n", len(secrets), *output)
 	return nil
 }
 
@@ -298,9 +308,18 @@ func runGetMany(cfg Config, args []string) error {
 		return err
 	}
 
-	names := fs.Args()
-	if len(names) == 0 {
+	rawNames := fs.Args()
+	if len(rawNames) == 0 {
 		return errors.New("get-many requires at least one secret name")
+	}
+
+	names := make([]string, 0, len(rawNames))
+	for _, name := range rawNames {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			return errors.New("get-many requires non-empty secret names")
+		}
+		names = append(names, trimmed)
 	}
 
 	projectID, err := resolveProjectID(*projectIDFlag)
@@ -313,12 +332,25 @@ func runGetMany(cfg Config, args []string) error {
 		return err
 	}
 
-	for _, name := range names {
-		v, err := getSecret(client, cfg, projectID, name)
-		if err != nil {
-			return fmt.Errorf("failed to fetch %q: %w", name, err)
+	secrets, err := getBatchSecrets(client, cfg, projectID, names)
+	if err != nil {
+		return err
+	}
+
+	values := make(map[string]string, len(secrets))
+	for _, secret := range secrets {
+		if strings.TrimSpace(secret.Name) == "" {
+			continue
 		}
-		fmt.Printf("%s=%s\n", name, formatEnvValue(v))
+		values[secret.Name] = secret.Value
+	}
+
+	for _, name := range names {
+		value, ok := values[name]
+		if !ok {
+			return fmt.Errorf("secret not found: %s", name)
+		}
+		fmt.Printf("%s=%s\n", name, formatEnvValue(value))
 	}
 
 	return nil
@@ -1414,6 +1446,40 @@ func getSecret(client *http.Client, cfg Config, projectID string, name string) (
 	}
 
 	return payload.Value, nil
+}
+
+func getAllSecrets(client *http.Client, cfg Config, projectID string) ([]SecretValue, error) {
+	endpoint := fmt.Sprintf("%s/v1/projects/%s/secrets/all", cfg.BaseURL, url.PathEscape(projectID))
+	respBody, err := doJSONRequest(client, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload SecretValuesResponse
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return nil, fmt.Errorf("invalid secret list response: %w", err)
+	}
+	return payload.Secrets, nil
+}
+
+func getBatchSecrets(client *http.Client, cfg Config, projectID string, names []string) ([]SecretValue, error) {
+	endpoint := fmt.Sprintf("%s/v1/projects/%s/secrets/batch", cfg.BaseURL, url.PathEscape(projectID))
+	payload := SecretsBatchRequest{Names: names}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode payload: %w", err)
+	}
+
+	respBody, err := doJSONRequest(client, http.MethodPost, endpoint, body)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp SecretValuesResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("invalid batch response: %w", err)
+	}
+	return resp.Secrets, nil
 }
 
 func upsertSecret(client *http.Client, cfg Config, projectID string, name string, value string) error {
