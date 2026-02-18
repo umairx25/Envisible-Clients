@@ -31,6 +31,33 @@ def _is_local_base_url(base_url: str) -> bool:
     host = parsed.hostname or ""
     return host in {"localhost", "127.0.0.1", "0.0.0.0"}
 
+def _build_headers() -> dict:
+    ci_token = os.getenv("ENVIS_CI_TOKEN")
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if ci_token:
+        headers["X-CI-Token"] = ci_token
+        return headers
+
+    ensure_session()
+    session = load_session()
+    headers["Authorization"] = f"Bearer {session['access_token']}"
+    if _is_local_base_url(BASE_URL):
+        user_id = _extract_user_id(session)
+        if user_id:
+            headers["X-User-Id"] = user_id
+    return headers
+
+def _parse_json_response(resp: requests.Response, error_context: str) -> dict:
+    try:
+        return resp.json()
+    except ValueError:
+        text = resp.text.strip()
+        if text:
+            return {"raw": text}
+        raise RuntimeError(f"API returned an empty, non-JSON response when {error_context}.")
+
 """
 Main functions
 """
@@ -53,21 +80,7 @@ def get(project_id: str, secret_name: str) -> dict:
     """
     Fetch a secret value, enforcing that the caller has an authenticated session.
     """
-    ci_token = os.getenv("ENVIS_CI_TOKEN")
-    if not ci_token:
-        ensure_session()
-        session = load_session()
-    headers = {
-        "Content-Type": "application/json",
-    }
-    if ci_token:
-        headers["X-CI-Token"] = ci_token
-    else:
-        headers["Authorization"] = f"Bearer {session['access_token']}"
-        if _is_local_base_url(BASE_URL):
-            user_id = _extract_user_id(session)
-            if user_id:
-                headers["X-User-Id"] = user_id
+    headers = _build_headers()
 
     url = f"{BASE_URL}/v1/projects/{project_id}/secrets/{secret_name}"
     try:
@@ -79,11 +92,56 @@ def get(project_id: str, secret_name: str) -> dict:
     except requests.RequestException as exc:
         raise RuntimeError(f"Failed to reach Envault API: {exc}") from exc
 
-    try:
-        res= resp.json()
+    res = _parse_json_response(resp, "fetching secret")
+    if isinstance(res, dict) and "value" in res:
         return res["value"]
-    except ValueError:
-        text = resp.text.strip()
-        if text:
-            return {"raw": text}
-        raise RuntimeError("API returned an empty, non-JSON response when fetching secret.")
+    return res
+
+def get_many(project_id: str, secret_names: list[str]) -> list[dict]:
+    """
+    Fetch multiple secrets in a single request using the batch endpoint.
+    """
+    if not isinstance(secret_names, list):
+        raise RuntimeError("secret_names must be a list of strings.")
+
+    names = [name.strip() for name in secret_names if isinstance(name, str) and name.strip()]
+    if not names:
+        raise RuntimeError("secret_names must include at least one non-empty name.")
+
+    headers = _build_headers()
+    url = f"{BASE_URL}/v1/projects/{project_id}/secrets/batch"
+
+    try:
+        resp = requests.post(url, headers=headers, json={"names": names}, timeout=10)
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        raise RuntimeError(f"Failed to fetch secrets ({exc.response.status_code if exc.response else 'HTTP error'}): {detail}") from exc
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Failed to reach Envault API: {exc}") from exc
+
+    res = _parse_json_response(resp, "fetching secrets")
+    if isinstance(res, dict) and "secrets" in res:
+        return res["secrets"]
+    return res
+
+def get_all(project_id: str) -> list[dict]:
+    """
+    Fetch all secrets for a project in a single request.
+    """
+    headers = _build_headers()
+    url = f"{BASE_URL}/v1/projects/{project_id}/secrets/all"
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        raise RuntimeError(f"Failed to fetch secrets ({exc.response.status_code if exc.response else 'HTTP error'}): {detail}") from exc
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Failed to reach Envault API: {exc}") from exc
+
+    res = _parse_json_response(resp, "fetching secrets")
+    if isinstance(res, dict) and "secrets" in res:
+        return res["secrets"]
+    return res

@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-from .main import get, logout
+from .main import get, get_all, get_many, logout
 
-__all__ = ["get", "logout"]
-
+__all__ = ["get", "get_all", "get_many", "logout"]
