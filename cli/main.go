@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,6 +28,9 @@ const (
 	pollWaitTimeout     = 120 * time.Second
 	defaultPollDelay    = 5 * time.Second
 )
+
+//go:embed MANUAL.md
+var manual string
 
 type Config struct {
 	BaseURL      string
@@ -161,6 +165,19 @@ func run(args []string) error {
 	}
 
 	switch args[0] {
+	case "help", "--help", "-h":
+		if len(args) > 1 {
+			printManualSection(args[1])
+			return nil
+		}
+		printManualSection("Commands")
+		fmt.Println()
+		fmt.Println("Run `envis help <command>` for command details.")
+		fmt.Println("Run `envis man` to show the full manual.")
+		return nil
+	case "man":
+		printManual()
+		return nil
 	case "pull":
 		return runPull(cfg, args[1:])
 	case "push":
@@ -249,6 +266,45 @@ func printUsage() {
 	fmt.Println("  envis ci-token-verify --project-id <uuid> --token <token>")
 	fmt.Println("  envis login")
 	fmt.Println("  envis logout")
+	fmt.Println("  envis help")
+	fmt.Println("  envis man")
+}
+
+func printManual() {
+	fmt.Println(strings.TrimSpace(manual))
+}
+
+func printManualSection(section string) {
+	if section == "" {
+		printManual()
+		return
+	}
+	needle := strings.ToLower(strings.TrimSpace(section))
+	lines := strings.Split(manual, "\n")
+	var out []string
+	inSection := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "## ") {
+			name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "## ")))
+			if inSection {
+				break
+			}
+			if name == needle {
+				inSection = true
+				out = append(out, line)
+				continue
+			}
+		}
+		if inSection {
+			out = append(out, line)
+		}
+	}
+	if len(out) == 0 {
+		fmt.Printf("Unknown help topic: %s\n", section)
+		fmt.Println("Run `envis help` to see available topics.")
+		return
+	}
+	fmt.Println(strings.TrimSpace(strings.Join(out, "\n")))
 }
 
 func runPull(cfg Config, args []string) error {
@@ -1121,17 +1177,8 @@ func newConfig() (Config, error) {
 		return Config{}, fmt.Errorf("failed to resolve home dir: %w", err)
 	}
 
-	baseURL := strings.TrimSpace(os.Getenv("ENVIS_API_URL"))
-	if baseURL == "" {
-		baseURL = defaultAPIURL
-	}
-	baseURL = strings.TrimRight(baseURL, "/")
-
-	dashURL := strings.TrimSpace(os.Getenv("ENVIS_DASH_URL"))
-	if dashURL == "" {
-		dashURL = defaultDashboardURL
-	}
-	dashURL = strings.TrimRight(dashURL, "/")
+	baseURL := strings.TrimRight(defaultAPIURL, "/")
+	dashURL := strings.TrimRight(defaultDashboardURL, "/")
 
 	return Config{
 		BaseURL:      baseURL,
