@@ -71,6 +71,12 @@ mv ./envis /usr/local/bin/envis
 ./envis pull --project-id <uuid> --output .env
 ```
 
+By default, this adds the output filename to a `.gitignore` in the same directory (creates one if missing). To opt out:
+
+```bash
+./envis pull --project-id <uuid> --output .env --no-gitignore
+```
+
 ### Log out
 
 ```bash

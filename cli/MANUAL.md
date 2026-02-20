@@ -74,7 +74,8 @@ Run `envis help <command>` for details.
 
 ## pull
 - Download all secrets for a project and write a dotenv file.
-- Options: `--project-id <uuid>`, `--output <path>` (default `.env`)
+- Options: `--project-id <uuid>`, `--output <path>` (default `.env`), `--no-gitignore`
+- By default, adds the output filename to a `.gitignore` in the same directory (creates one if missing).
 - Example: `envis pull --project-id <uuid> --output .env`
 
 ## push

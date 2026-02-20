@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"path"
 	"runtime"
 	"sort"
 	"strconv"
@@ -23,7 +24,8 @@ import (
 )
 
 const (
-	defaultAPIURL       = "https://api.envisible.dev"
+	// defaultAPIURL       = "https://api.envisible.dev"
+	defaultAPIURL       = "http://0.0.0.0:8000"
 	defaultDashboardURL = "https://envisible.netlify.app"
 	pollWaitTimeout     = 120 * time.Second
 	defaultPollDelay    = 5 * time.Second
@@ -244,7 +246,7 @@ func printUsage() {
 	fmt.Println("envis - Envault CLI")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  envis pull [--project-id <uuid>] [--output .env]")
+	fmt.Println("  envis pull [--project-id <uuid>] [--output .env] [--no-gitignore]")
 	fmt.Println("  envis push [--project-id <uuid>] [--file .env]")
 	fmt.Println("  envis secret-names [--project-id <uuid>]")
 	fmt.Println("  envis secret-get --project-id <uuid> --name <key>")
@@ -313,6 +315,7 @@ func runPull(cfg Config, args []string) error {
 
 	projectIDFlag := fs.String("project-id", "", "Project UUID")
 	output := fs.String("output", ".env", "Output env file path")
+	noGitignore := fs.Bool("no-gitignore", false, "Do not add output file to .gitignore")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -352,6 +355,90 @@ func runPull(cfg Config, args []string) error {
 	}
 
 	fmt.Printf("Wrote %d secret(s) to %s\n", len(secrets), *output)
+	if !*noGitignore {
+		if err := ensureGitignoreForOutput(*output); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureGitignoreForOutput(outputPath string) error {
+	dir := filepath.Dir(outputPath)
+	gitignorePath := filepath.Join(dir, ".gitignore")
+	if dir == "." {
+		gitignorePath = ".gitignore"
+	}
+	filename := filepath.Base(outputPath)
+
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("failed to read %s: %w", gitignorePath, err)
+		}
+		if err := os.WriteFile(gitignorePath, nil, 0o644); err != nil {
+			return fmt.Errorf("failed to create %s: %w", gitignorePath, err)
+		}
+		fmt.Printf("Created %s\n", gitignorePath)
+	} else if isIgnoredByGitignore(content, filename) {
+		fmt.Printf("%s already in %s\n", filename, gitignorePath)
+		return nil
+	}
+
+	appendContent := buildGitignoreEntry(content, filename)
+	if err := appendToFile(gitignorePath, appendContent); err != nil {
+		return err
+	}
+	fmt.Printf("Added %s to %s\n", filename, gitignorePath)
+	return nil
+}
+
+func isIgnoredByGitignore(content []byte, filename string) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "!") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "/")
+		if strings.Contains(line, "/") {
+			continue
+		}
+		if line == filename {
+			return true
+		}
+		if strings.ContainsAny(line, "*?[]") {
+			if matched, err := path.Match(line, filename); err == nil && matched {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func buildGitignoreEntry(existing []byte, filename string) []byte {
+	var buf bytes.Buffer
+	if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
+		buf.WriteString("\n")
+	}
+	buf.WriteString("# Added by Envisible\n")
+	buf.WriteString(filename)
+	buf.WriteString("\n")
+	return buf.Bytes()
+}
+
+func appendToFile(path string, content []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return fmt.Errorf("failed to update %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := f.Write(content); err != nil {
+		return fmt.Errorf("failed to update %s: %w", path, err)
+	}
 	return nil
 }
 
