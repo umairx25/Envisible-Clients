@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"path"
 	"runtime"
 	"sort"
 	"strconv"
@@ -24,9 +23,8 @@ import (
 )
 
 const (
-	// defaultAPIURL       = "https://api.envisible.dev"
-	defaultAPIURL       = "http://0.0.0.0:8000"
-	defaultDashboardURL = "https://envisible.netlify.app"
+	defaultAPIURL       = "https://api.envisible.dev"
+	defaultDashboardURL = "https://envisible.dev"
 	pollWaitTimeout     = 120 * time.Second
 	defaultPollDelay    = 5 * time.Second
 )
@@ -65,8 +63,8 @@ type SecretValuesResponse struct {
 type Project struct {
 	ProjectID   string `json:"project_id"`
 	Name        string `json:"name"`
-	OwnerID     string `json:"owner_id"`
 	CITokenSet  bool   `json:"ci_token_set"`
+	Role        string `json:"role"`
 }
 
 type CurrentUser struct {
@@ -109,6 +107,7 @@ type CiTokenVerifyRequest struct {
 
 type InviteCreateRequest struct {
 	Email string `json:"email"`
+	Role  string `json:"role,omitempty"`
 }
 
 type ProjectCreateRequest struct {
@@ -123,11 +122,11 @@ type ProjectMember struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Email string `json:"email"`
+	Role  string `json:"role"`
 }
 
 type ProjectMembersResponse struct {
 	ProjectID string          `json:"project_id"`
-	OwnerID   *string         `json:"owner_id"`
 	Members   []ProjectMember `json:"members"`
 }
 
@@ -246,7 +245,7 @@ func printUsage() {
 	fmt.Println("envis - Envault CLI")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  envis pull [--project-id <uuid>] [--output .env] [--no-gitignore]")
+	fmt.Println("  envis pull [--project-id <uuid>] [--output .env]")
 	fmt.Println("  envis push [--project-id <uuid>] [--file .env]")
 	fmt.Println("  envis secret-names [--project-id <uuid>]")
 	fmt.Println("  envis secret-get --project-id <uuid> --name <key>")
@@ -261,7 +260,7 @@ func printUsage() {
 	fmt.Println("  envis get-many [--project-id <uuid>] <secret1> <secret2> ...")
 	fmt.Println("  envis invites")
 	fmt.Println("  envis invite-respond --invite-id <uuid> --accept|--reject")
-	fmt.Println("  envis invite-create --project-id <uuid> --email <user@example.com>")
+	fmt.Println("  envis invite-create --project-id <uuid> --email <user@example.com> [--role admin|member]")
 	fmt.Println("  envis status")
 	fmt.Println("  envis ci-token-generate --project-id <uuid>")
 	fmt.Println("  envis ci-token-reset --project-id <uuid>")
@@ -315,7 +314,6 @@ func runPull(cfg Config, args []string) error {
 
 	projectIDFlag := fs.String("project-id", "", "Project UUID")
 	output := fs.String("output", ".env", "Output env file path")
-	noGitignore := fs.Bool("no-gitignore", false, "Do not add output file to .gitignore")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -355,90 +353,6 @@ func runPull(cfg Config, args []string) error {
 	}
 
 	fmt.Printf("Wrote %d secret(s) to %s\n", len(secrets), *output)
-	if !*noGitignore {
-		if err := ensureGitignoreForOutput(*output); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func ensureGitignoreForOutput(outputPath string) error {
-	dir := filepath.Dir(outputPath)
-	gitignorePath := filepath.Join(dir, ".gitignore")
-	if dir == "." {
-		gitignorePath = ".gitignore"
-	}
-	filename := filepath.Base(outputPath)
-
-	content, err := os.ReadFile(gitignorePath)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("failed to read %s: %w", gitignorePath, err)
-		}
-		if err := os.WriteFile(gitignorePath, nil, 0o644); err != nil {
-			return fmt.Errorf("failed to create %s: %w", gitignorePath, err)
-		}
-		fmt.Printf("Created %s\n", gitignorePath)
-	} else if isIgnoredByGitignore(content, filename) {
-		fmt.Printf("%s already in %s\n", filename, gitignorePath)
-		return nil
-	}
-
-	appendContent := buildGitignoreEntry(content, filename)
-	if err := appendToFile(gitignorePath, appendContent); err != nil {
-		return err
-	}
-	fmt.Printf("Added %s to %s\n", filename, gitignorePath)
-	return nil
-}
-
-func isIgnoredByGitignore(content []byte, filename string) bool {
-	scanner := bufio.NewScanner(bytes.NewReader(content))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "!") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "/")
-		if strings.Contains(line, "/") {
-			continue
-		}
-		if line == filename {
-			return true
-		}
-		if strings.ContainsAny(line, "*?[]") {
-			if matched, err := path.Match(line, filename); err == nil && matched {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func buildGitignoreEntry(existing []byte, filename string) []byte {
-	var buf bytes.Buffer
-	if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
-		buf.WriteString("\n")
-	}
-	buf.WriteString("# Added by Envisible\n")
-	buf.WriteString(filename)
-	buf.WriteString("\n")
-	return buf.Bytes()
-}
-
-func appendToFile(path string, content []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
-	if err != nil {
-		return fmt.Errorf("failed to update %s: %w", path, err)
-	}
-	defer f.Close()
-	if _, err := f.Write(content); err != nil {
-		return fmt.Errorf("failed to update %s: %w", path, err)
-	}
 	return nil
 }
 
@@ -709,10 +623,10 @@ func runProjects(cfg Config, args []string) error {
 		return err
 	}
 
-	userID, err := getCurrentUserID(client, cfg)
-	if err != nil {
-		return err
-	}
+	// userID, err := getCurrentUserID(client, cfg)
+	// if err != nil {
+	// 	return err
+	// }
 
 	if len(projects) == 0 {
 		fmt.Println("No projects found.")
@@ -724,9 +638,9 @@ func runProjects(cfg Config, args []string) error {
 	})
 
 	for _, project := range projects {
-		role := "member"
-		if strings.TrimSpace(project.OwnerID) == userID {
-			role = "owner"
+		role := strings.TrimSpace(project.Role)
+		if role == "" {
+			role = "member"
 		}
 		ciTokenStatus := "no"
 		if project.CITokenSet {
@@ -874,7 +788,11 @@ func runProjectMembers(cfg Config, args []string) error {
 	for _, member := range resp.Members {
 		name := strings.TrimSpace(member.Name)
 		email := strings.TrimSpace(member.Email)
-		fmt.Printf("%s\t%s\t%s\n", strings.TrimSpace(member.ID), name, email)
+		role := strings.TrimSpace(member.Role)
+		if role == "" {
+			role = "member"
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\n", strings.TrimSpace(member.ID), role, name, email)
 	}
 	return nil
 }
@@ -1119,6 +1037,7 @@ func runInviteCreate(cfg Config, args []string) error {
 
 	projectIDFlag := fs.String("project-id", "", "Project UUID")
 	email := fs.String("email", "", "Recipient email")
+	role := fs.String("role", "member", "Invite role: admin|member")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1132,6 +1051,13 @@ func runInviteCreate(cfg Config, args []string) error {
 	if recipient == "" {
 		return errors.New("missing email: pass --email")
 	}
+	inviteRole := strings.ToLower(strings.TrimSpace(*role))
+	if inviteRole == "" {
+		inviteRole = "member"
+	}
+	if inviteRole != "admin" && inviteRole != "member" {
+		return errors.New("invalid role: must be admin or member")
+	}
 
 	if cfg.CIToken != "" {
 		return errors.New("invite-create command requires user auth (ENVIS_CI_TOKEN is not supported)")
@@ -1142,24 +1068,7 @@ func runInviteCreate(cfg Config, args []string) error {
 		return err
 	}
 
-	project, err := getProjectByID(client, cfg, projectID)
-	if err != nil {
-		return err
-	}
-	if project == nil {
-		return errors.New("project not found or not accessible")
-	}
-
-	userID, err := getCurrentUserID(client, cfg)
-	if err != nil {
-		return err
-	}
-
-	if strings.TrimSpace(project.OwnerID) != userID {
-		return errors.New("only the project owner can create invites")
-	}
-
-	invite, err := createInvite(client, cfg, projectID, recipient)
+	invite, err := createInvite(client, cfg, projectID, recipient, inviteRole)
 	if err != nil {
 		return err
 	}
@@ -1693,9 +1602,9 @@ func respondToInvite(client *http.Client, cfg Config, inviteID string, action st
 	return invite, nil
 }
 
-func createInvite(client *http.Client, cfg Config, projectID, email string) (Invite, error) {
+func createInvite(client *http.Client, cfg Config, projectID, email, role string) (Invite, error) {
 	endpoint := fmt.Sprintf("%s/v1/projects/%s/invite", cfg.BaseURL, url.PathEscape(projectID))
-	payload := InviteCreateRequest{Email: strings.TrimSpace(email)}
+	payload := InviteCreateRequest{Email: strings.TrimSpace(email), Role: role}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return Invite{}, fmt.Errorf("failed to encode payload: %w", err)
