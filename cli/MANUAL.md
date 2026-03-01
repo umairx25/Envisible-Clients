@@ -28,7 +28,7 @@ CI token auth:
 ## Environment
 `ENVIS_PROJECT_ID`
 - Default project id used by commands that accept `--project-id`.
-- Example: `export ENVIS_PROJECT_ID="<uuid>"`
+- Example: `export ENVIS_PROJECT_ID="<uuid>"` or `envis project-set --project-id <uuid>`
 
 `ENVIS_CI_TOKEN`
 - Use CI-token auth instead of user auth.
@@ -47,6 +47,7 @@ Run `envis help <command>` for details.
 - `secret-delete`
 - `get-many`
 - `projects`
+- `project-set`
 - `project-create`
 - `project-rename`
 - `project-delete`
@@ -74,8 +75,8 @@ Run `envis help <command>` for details.
 
 ## pull
 - Download all secrets for a project and write a dotenv file.
-- Options: `--project-id <uuid>`, `--output <path>` (default `.env`), `--no-gitignore`
-- By default, adds the output filename to a `.gitignore` in the same directory (creates one if missing).
+- Options: `--project-id <uuid>`, `--output <path>` (default `.env`), `--no-env-example`
+- Populates `.env.example` with any missing variable names unless `--no-env-example` is set.
 - Example: `envis pull --project-id <uuid> --output .env`
 
 ## push
@@ -111,6 +112,11 @@ Run `envis help <command>` for details.
 ## projects
 - List projects available to the current user.
 - Example: `envis projects`
+
+## project-set
+- Set the default project id for this machine.
+- Options: `--project-id <uuid>`
+- Example: `envis project-set --project-id <uuid>`
 
 ## project-create
 - Create a new project.

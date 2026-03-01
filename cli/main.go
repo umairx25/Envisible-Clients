@@ -37,6 +37,7 @@ type Config struct {
 	DashboardURL string
 	SessionPath  string
 	CIToken      string
+	ProjectPath  string
 }
 
 type Session struct {
@@ -61,10 +62,10 @@ type SecretValuesResponse struct {
 }
 
 type Project struct {
-	ProjectID   string `json:"project_id"`
-	Name        string `json:"name"`
-	CITokenSet  bool   `json:"ci_token_set"`
-	Role        string `json:"role"`
+	ProjectID  string `json:"project_id"`
+	Name       string `json:"name"`
+	CITokenSet bool   `json:"ci_token_set"`
+	Role       string `json:"role"`
 }
 
 type CurrentUser struct {
@@ -193,6 +194,8 @@ func run(args []string) error {
 		return runSecretDelete(cfg, args[1:])
 	case "projects":
 		return runProjects(cfg, args[1:])
+	case "project-set":
+		return runProjectSet(cfg, args[1:])
 	case "project-create":
 		return runProjectCreate(cfg, args[1:])
 	case "project-rename":
@@ -252,6 +255,7 @@ func printUsage() {
 	fmt.Println("  envis secret-set --project-id <uuid> --name <key> --value <value>")
 	fmt.Println("  envis secret-delete --project-id <uuid> --name <key>")
 	fmt.Println("  envis projects")
+	fmt.Println("  envis project-set --project-id <uuid>")
 	fmt.Println("  envis project-create --name <name>")
 	fmt.Println("  envis project-rename --project-id <uuid> --name <new-name>")
 	fmt.Println("  envis project-delete --project-id <uuid>")
@@ -314,6 +318,7 @@ func runPull(cfg Config, args []string) error {
 
 	projectIDFlag := fs.String("project-id", "", "Project UUID")
 	output := fs.String("output", ".env", "Output env file path")
+	noEnvExample := fs.Bool("no-env-example", false, "Disable .env.example population")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -350,6 +355,23 @@ func runPull(cfg Config, args []string) error {
 
 	if err := os.WriteFile(*output, buf.Bytes(), 0o600); err != nil {
 		return fmt.Errorf("failed to write %s: %w", *output, err)
+	}
+
+	keys, _, err := parseEnvFile(*output)
+	if err != nil {
+		return err
+	}
+
+	if !*noEnvExample {
+		added, err := updateEnvExample(envExamplePath(*output), keys)
+		if err != nil {
+			return err
+		}
+		if len(added) == 0 {
+			fmt.Println("No new vars added to .env.example.")
+		} else {
+			fmt.Printf("Added %d var(s) to .env.example: %s\n", len(added), strings.Join(added, ", "))
+		}
 	}
 
 	fmt.Printf("Wrote %d secret(s) to %s\n", len(secrets), *output)
@@ -648,6 +670,27 @@ func runProjects(cfg Config, args []string) error {
 		}
 		fmt.Printf("%s\t%s\t%s\t%s\n", project.ProjectID, project.Name, role, ciTokenStatus)
 	}
+	return nil
+}
+
+func runProjectSet(cfg Config, args []string) error {
+	fs := flag.NewFlagSet("project-set", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	projectIDFlag := fs.String("project-id", "", "Project UUID")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	projectID := strings.TrimSpace(*projectIDFlag)
+	if projectID == "" {
+		return errors.New("missing project id: pass --project-id")
+	}
+
+	if err := writeProjectID(cfg.ProjectPath, projectID); err != nil {
+		return err
+	}
+	fmt.Printf("Default project set to %s\n", projectID)
 	return nil
 }
 
@@ -1164,7 +1207,13 @@ func resolveProjectID(flagValue string) (string, error) {
 		return value, nil
 	}
 
-	return "", errors.New("missing project id: pass --project-id or set ENVIS_PROJECT_ID")
+	if value, err := readProjectID(); err == nil && value != "" {
+		return value, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+
+	return "", errors.New("missing project id: pass --project-id, set ENVIS_PROJECT_ID, or run `envis project-set`")
 }
 
 func newConfig() (Config, error) {
@@ -1180,6 +1229,7 @@ func newConfig() (Config, error) {
 		BaseURL:      baseURL,
 		DashboardURL: dashURL,
 		SessionPath:  filepath.Join(home, ".envis", "session.json"),
+		ProjectPath:  filepath.Join(home, ".envis", "project_id"),
 		CIToken:      strings.TrimSpace(os.Getenv("ENVIS_CI_TOKEN")),
 	}, nil
 }
@@ -1258,6 +1308,29 @@ func loadSession(path string) (Session, error) {
 		return Session{}, fmt.Errorf("session file is corrupt: %w", err)
 	}
 	return session, nil
+}
+
+func readProjectID() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve home dir: %w", err)
+	}
+	path := filepath.Join(home, ".envis", "project_id")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func writeProjectID(path, projectID string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("failed to create config dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(projectID)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("failed to write project id: %w", err)
+	}
+	return nil
 }
 
 func writeSession(path string, session Session) error {
@@ -1954,4 +2027,84 @@ func parseEnvFile(path string) ([]string, map[string]string, error) {
 	}
 
 	return keys, values, nil
+}
+
+func envExamplePath(output string) string {
+	dir := filepath.Dir(output)
+	return filepath.Join(dir, ".env.example")
+}
+
+func writeEnvKeyFile(path string, keys []string, mode os.FileMode) error {
+	var buf bytes.Buffer
+	for _, key := range keys {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		buf.WriteString(key)
+		buf.WriteString("=\n")
+	}
+	if err := os.WriteFile(path, buf.Bytes(), mode); err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
+	}
+	return nil
+}
+
+func updateEnvExample(path string, keys []string) ([]string, error) {
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if err := writeEnvKeyFile(path, keys, 0o644); err != nil {
+				return nil, err
+			}
+			return keys, nil
+		}
+		return nil, fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+
+	existingKeys, _, err := parseEnvFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	existing := make(map[string]bool, len(existingKeys))
+	for _, key := range existingKeys {
+		existing[key] = true
+	}
+
+	added := make([]string, 0)
+	for _, key := range keys {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		if !existing[key] {
+			added = append(added, key)
+		}
+	}
+	if len(added) == 0 {
+		return added, nil
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		if _, err := f.WriteString("\n"); err != nil {
+			return nil, fmt.Errorf("failed to write %s: %w", path, err)
+		}
+	}
+
+	for _, key := range added {
+		if _, err := f.WriteString(key + "=\n"); err != nil {
+			return nil, fmt.Errorf("failed to write %s: %w", path, err)
+		}
+	}
+
+	return added, nil
 }
