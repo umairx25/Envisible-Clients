@@ -90,6 +90,11 @@ type Invite struct {
 	ProjectName    string `json:"project_name"`
 }
 
+type AuditCreateRequest struct {
+	Action  string `json:"action"`
+	Message string `json:"message"`
+}
+
 type SecretGetResponse struct {
 	Value string `json:"value"`
 }
@@ -342,14 +347,51 @@ func runPull(cfg Config, args []string) error {
 		return secrets[i].Name < secrets[j].Name
 	})
 
-	var buf bytes.Buffer
+	existingKeys, existingValues, err := parseEnvFile(*output)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		existingKeys = nil
+		existingValues = nil
+	}
+
+	values := make(map[string]string, len(existingValues)+len(secrets))
+	for key, value := range existingValues {
+		values[key] = value
+	}
+
+	secretKeySet := make(map[string]bool, len(secrets))
+	secretKeys := make([]string, 0, len(secrets))
 	for _, secret := range secrets {
 		if strings.TrimSpace(secret.Name) == "" {
 			continue
 		}
-		buf.WriteString(secret.Name)
+		secretKeySet[secret.Name] = true
+		secretKeys = append(secretKeys, secret.Name)
+		values[secret.Name] = secret.Value
+	}
+
+	extraKeys := make([]string, 0, len(existingKeys))
+	for _, key := range existingKeys {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		if !secretKeySet[key] {
+			extraKeys = append(extraKeys, key)
+		}
+	}
+
+	keys := append(secretKeys, extraKeys...)
+
+	var buf bytes.Buffer
+	for _, key := range keys {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		buf.WriteString(key)
 		buf.WriteString("=")
-		buf.WriteString(formatEnvValue(secret.Value))
+		buf.WriteString(formatEnvValue(values[key]))
 		buf.WriteString("\n")
 	}
 
@@ -357,8 +399,7 @@ func runPull(cfg Config, args []string) error {
 		return fmt.Errorf("failed to write %s: %w", *output, err)
 	}
 
-	keys, _, err := parseEnvFile(*output)
-	if err != nil {
+	if err := ensureGitignoreForOutput(*output); err != nil {
 		return err
 	}
 
@@ -371,6 +412,13 @@ func runPull(cfg Config, args []string) error {
 			fmt.Println("No new vars added to .env.example.")
 		} else {
 			fmt.Printf("Added %d var(s) to .env.example: %s\n", len(added), strings.Join(added, ", "))
+		}
+	}
+
+	if cfg.CIToken == "" {
+		message := fmt.Sprintf("Pulled %d secrets via CLI pull (%s)", len(secrets), *output)
+		if err := createAuditEvent(client, cfg, projectID, "pulled", message); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write audit event: %v\n", err)
 		}
 	}
 
@@ -466,6 +514,13 @@ func runPush(cfg Config, args []string) error {
 	for _, name := range keys {
 		if err := upsertSecret(client, cfg, projectID, name, values[name]); err != nil {
 			return fmt.Errorf("failed to push %q: %w", name, err)
+		}
+	}
+
+	if cfg.CIToken == "" {
+		message := fmt.Sprintf("Pushed %d secrets via CLI push (%s)", len(keys), *envFile)
+		if err := createAuditEvent(client, cfg, projectID, "pushed", message); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write audit event: %v\n", err)
 		}
 	}
 
@@ -1222,7 +1277,11 @@ func newConfig() (Config, error) {
 		return Config{}, fmt.Errorf("failed to resolve home dir: %w", err)
 	}
 
+	localURI := strings.TrimSpace(os.Getenv("LOCAL_URI"))
 	baseURL := strings.TrimRight(defaultAPIURL, "/")
+	if localURI != "" {
+		baseURL = strings.TrimRight(localURI, "/")
+	}
 	dashURL := strings.TrimRight(defaultDashboardURL, "/")
 
 	return Config{
@@ -1615,6 +1674,23 @@ func upsertSecret(client *http.Client, cfg Config, projectID string, name string
 func deleteSecret(client *http.Client, cfg Config, projectID, name string) error {
 	endpoint := fmt.Sprintf("%s/v1/projects/%s/secrets/%s", cfg.BaseURL, url.PathEscape(projectID), url.PathEscape(name))
 	if _, err := doJSONRequest(client, http.MethodDelete, endpoint, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+func createAuditEvent(client *http.Client, cfg Config, projectID, action, message string) error {
+	endpoint := fmt.Sprintf("%s/v1/projects/%s/audit", cfg.BaseURL, url.PathEscape(projectID))
+	payload := AuditCreateRequest{
+		Action:  strings.TrimSpace(action),
+		Message: strings.TrimSpace(message),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to encode payload: %w", err)
+	}
+
+	if _, err := doJSONRequest(client, http.MethodPost, endpoint, body); err != nil {
 		return err
 	}
 	return nil
@@ -2032,6 +2108,61 @@ func parseEnvFile(path string) ([]string, map[string]string, error) {
 func envExamplePath(output string) string {
 	dir := filepath.Dir(output)
 	return filepath.Join(dir, ".env.example")
+}
+
+func ensureGitignoreForOutput(output string) error {
+	if strings.TrimSpace(output) == "" {
+		return nil
+	}
+
+	dir := filepath.Dir(output)
+	gitignorePath := filepath.Join(dir, ".gitignore")
+	rel, err := filepath.Rel(dir, output)
+	if err != nil {
+		return fmt.Errorf("failed to resolve gitignore entry: %w", err)
+	}
+	entry := filepath.ToSlash(rel)
+	if entry == "." || entry == "" {
+		return nil
+	}
+
+	var existing []byte
+	if b, err := os.ReadFile(gitignorePath); err == nil {
+		existing = b
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to read %s: %w", gitignorePath, err)
+	}
+
+	if len(existing) > 0 {
+		lines := strings.Split(string(existing), "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) == entry {
+				return nil
+			}
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(gitignorePath), 0o755); err != nil {
+		return fmt.Errorf("failed to create gitignore dir: %w", err)
+	}
+
+	f, err := os.OpenFile(gitignorePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %w", gitignorePath, err)
+	}
+	defer f.Close()
+
+	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
+		if _, err := f.WriteString("\n"); err != nil {
+			return fmt.Errorf("failed to write %s: %w", gitignorePath, err)
+		}
+	}
+
+	if _, err := f.WriteString(entry + "\n"); err != nil {
+		return fmt.Errorf("failed to write %s: %w", gitignorePath, err)
+	}
+
+	return nil
 }
 
 func writeEnvKeyFile(path string, keys []string, mode os.FileMode) error {
