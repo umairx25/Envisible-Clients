@@ -1,8 +1,10 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	_ "embed"
 	"encoding/json"
@@ -27,6 +29,8 @@ const (
 	defaultDashboardURL = "https://envisible.dev"
 	pollWaitTimeout     = 120 * time.Second
 	defaultPollDelay    = 5 * time.Second
+	defaultRepo         = "umairx25/Envisible-Clients"
+	cliBinaryName       = "envis"
 )
 
 //go:embed MANUAL.md
@@ -243,6 +247,10 @@ func run(args []string) error {
 		}
 		fmt.Println("Logged out successfully.")
 		return nil
+	case "update":
+		return runUpdate(args[1:])
+	case "uninstall":
+		return runUninstall(args[1:])
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -276,6 +284,8 @@ func printUsage() {
 	fmt.Println("  envis ci-token-verify --project-id <uuid> --token <token>")
 	fmt.Println("  envis login")
 	fmt.Println("  envis logout")
+	fmt.Println("  envis update")
+	fmt.Println("  envis uninstall")
 	fmt.Println("  envis help")
 	fmt.Println("  envis man")
 }
@@ -1253,6 +1263,75 @@ func runStatus(cfg Config, args []string) error {
 	return nil
 }
 
+func runUpdate(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	installPath, err := resolveInstallPath()
+	if err != nil {
+		return err
+	}
+
+	osName, arch, err := normalizeOSArch()
+	if err != nil {
+		return err
+	}
+
+	assetURL, err := latestReleaseAssetURL(defaultRepo, osName, arch)
+	if err != nil {
+		return err
+	}
+
+	tmpDir, err := os.MkdirTemp("", "envis-update-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tarPath := filepath.Join(tmpDir, cliBinaryName+".tar.gz")
+	if err := downloadFile(assetURL, tarPath); err != nil {
+		return err
+	}
+
+	extractedPath := filepath.Join(tmpDir, cliBinaryName)
+	if err := extractTarGzBinary(tarPath, cliBinaryName, extractedPath); err != nil {
+		return err
+	}
+
+	if err := installBinary(extractedPath, installPath); err != nil {
+		return err
+	}
+
+	fmt.Printf("Updated %s at %s\n", cliBinaryName, installPath)
+	return nil
+}
+
+func runUninstall(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	installPath, err := resolveInstallPath()
+	if err != nil {
+		return err
+	}
+
+	if err := os.Remove(installPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%s not found at %s", cliBinaryName, installPath)
+		}
+		return fmt.Errorf("failed to remove %s: %w", installPath, err)
+	}
+
+	fmt.Printf("Uninstalled %s from %s\n", cliBinaryName, installPath)
+	return nil
+}
+
 func resolveProjectID(flagValue string) (string, error) {
 	if strings.TrimSpace(flagValue) != "" {
 		return strings.TrimSpace(flagValue), nil
@@ -1914,6 +1993,191 @@ func isLocalURL(raw string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	return host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0"
+}
+
+func resolveInstallPath() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv("ENVIS_INSTALL_DIR")); dir != "" {
+		return filepath.Join(dir, cliBinaryName), nil
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
+		}
+		if filepath.Base(exe) == cliBinaryName {
+			return exe, nil
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".local", "bin", cliBinaryName), nil
+}
+
+func normalizeOSArch() (string, string, error) {
+	var osName string
+	switch runtime.GOOS {
+	case "linux", "darwin":
+		osName = runtime.GOOS
+	default:
+		return "", "", fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+
+	var arch string
+	switch runtime.GOARCH {
+	case "amd64", "x86_64":
+		arch = "amd64"
+	case "arm64":
+		arch = "arm64"
+	default:
+		return "", "", fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+	}
+
+	return osName, arch, nil
+}
+
+type ghRelease struct {
+	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+func latestReleaseAssetURL(repo, osName, arch string) (string, error) {
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch latest release: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("failed to fetch latest release (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var release ghRelease
+	if err := json.Unmarshal(body, &release); err != nil {
+		return "", fmt.Errorf("invalid release response: %w", err)
+	}
+
+	suffix := fmt.Sprintf("_%s_%s.tar.gz", osName, arch)
+	for _, asset := range release.Assets {
+		if strings.HasPrefix(asset.Name, cliBinaryName+"_") && strings.HasSuffix(asset.Name, suffix) {
+			if strings.TrimSpace(asset.BrowserDownloadURL) != "" {
+				return asset.BrowserDownloadURL, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no release asset found for %s/%s", osName, arch)
+}
+
+func downloadFile(url, path string) error {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("download failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
+	}
+
+	return nil
+}
+
+func extractTarGzBinary(archivePath, binName, outputPath string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %w", archivePath, err)
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("failed to read gzip: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read archive: %w", err)
+		}
+		if hdr.FileInfo().IsDir() {
+			continue
+		}
+		if filepath.Base(hdr.Name) != binName {
+			continue
+		}
+
+		out, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		if err != nil {
+			return fmt.Errorf("failed to write %s: %w", outputPath, err)
+		}
+		if _, err := io.Copy(out, tr); err != nil {
+			out.Close()
+			return fmt.Errorf("failed to write %s: %w", outputPath, err)
+		}
+		if err := out.Close(); err != nil {
+			return fmt.Errorf("failed to write %s: %w", outputPath, err)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("binary %s not found in archive", binName)
+}
+
+func installBinary(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("failed to create install dir: %w", err)
+	}
+
+	tmpPath := dst + ".tmp"
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %w", src, err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("failed to write %s: %w", tmpPath, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return fmt.Errorf("failed to write %s: %w", tmpPath, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("failed to write %s: %w", tmpPath, err)
+	}
+
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return fmt.Errorf("failed to install %s: %w", dst, err)
+	}
+
+	return nil
 }
 
 func retryAfterOrDefault(header string, fallback time.Duration) time.Duration {
