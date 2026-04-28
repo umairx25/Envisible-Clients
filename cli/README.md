@@ -45,7 +45,7 @@ mv ./envis /usr/local/bin/envis
 
 1. Sign up for an Envisible account on the dashboard.
 2. Install the CLI and authenticate when prompted.
-3. Manage projects and secrets from your terminal:
+3. Manage projects and secrets from your terminal. In interactive terminals, `envis` prompts for missing projects, names, files, and confirmations. In CI or agent workflows, keep using flags and environment variables.
 
 ### Log in
 
@@ -59,29 +59,40 @@ mv ./envis /usr/local/bin/envis
 ./envis projects
 ```
 
+This shows project names and marks the current default with `*`.
+
 ### Fetch a secret
 
 ```bash
-./envis secret-get --project-id <uuid> --name API_KEY
+./envis secret-get
 ```
 
 ### Pull all secrets to a file
 
 ```bash
-./envis pull --project-id <uuid> --output .env
+./envis pull
 ```
 
 By default, this adds any missing variable names to `.env.example`. To opt out of updating `.env.example`:
 
 ```bash
-./envis pull --project-id <uuid> --output .env --no-env-example
+./envis pull --no-env-example
 ```
 
 ### Set current project
 
 ```bash
-./envis project-set --project-id <uuid>
+./envis project-set
 ```
+
+### Non-interactive usage
+
+```bash
+ENVIS_CI_TOKEN=<token> ENVIS_PROJECT_ID=<uuid> ./envis pull --output .env
+ENVIS_CI_TOKEN=<token> ENVIS_PROJECT_ID=<uuid> ./envis secret-get --name API_KEY
+```
+
+When `ENVIS_CI_TOKEN` is set, the CLI never prompts. Missing required inputs must be supplied with flags or environment variables.
 
 ### Log out
 

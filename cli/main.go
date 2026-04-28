@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -155,6 +157,12 @@ type PollAuthResponse struct {
 	Detail  string          `json:"detail"`
 }
 
+type ProjectResolutionOptions struct {
+	Prompt      string
+	AllowCreate bool
+	AllowManual bool
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
@@ -232,20 +240,39 @@ func run(args []string) error {
 	case "ci-token-verify":
 		return runCiTokenVerify(cfg, args[1:])
 	case "login":
+		if canPrompt(cfg) {
+			ok, err := promptConfirm("Open browser to authenticate?", true)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return errors.New("login canceled")
+			}
+		}
 		_, err := ensureSession(cfg)
 		if err != nil {
 			return err
 		}
-		fmt.Println("Logged in successfully.")
+		fmt.Println("✓ Logged in successfully.")
 		return nil
 	case "logout":
+		if canPrompt(cfg) {
+			ok, err := promptConfirm("Are you sure you want to log out?", false)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				fmt.Println("Logout canceled.")
+				return nil
+			}
+		}
 		if err := os.Remove(cfg.SessionPath); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return errors.New("already logged out")
 			}
 			return fmt.Errorf("failed to remove session: %w", err)
 		}
-		fmt.Println("Logged out successfully.")
+		fmt.Println("✓ Logged out successfully.")
 		return nil
 	case "update":
 		return runUpdate(args[1:])
@@ -264,24 +291,24 @@ func printUsage() {
 	fmt.Println("  envis pull [--project-id <uuid>] [--output .env]")
 	fmt.Println("  envis push [--project-id <uuid>] [--file .env]")
 	fmt.Println("  envis secret-names [--project-id <uuid>]")
-	fmt.Println("  envis secret-get --project-id <uuid> --name <key>")
-	fmt.Println("  envis secret-set --project-id <uuid> --name <key> --value <value>")
-	fmt.Println("  envis secret-delete --project-id <uuid> --name <key>")
+	fmt.Println("  envis secret-get [--project-id <uuid>] [--name <key>]")
+	fmt.Println("  envis secret-set [--project-id <uuid>] [--name <key>] [--value <value>]")
+	fmt.Println("  envis secret-delete [--project-id <uuid>] [--name <key>]")
 	fmt.Println("  envis projects")
-	fmt.Println("  envis project-set --project-id <uuid>")
-	fmt.Println("  envis project-create --name <name>")
-	fmt.Println("  envis project-rename --project-id <uuid> --name <new-name>")
-	fmt.Println("  envis project-delete --project-id <uuid>")
-	fmt.Println("  envis project-members --project-id <uuid>")
-	fmt.Println("  envis project-member-remove --project-id <uuid> --user-id <uuid>")
+	fmt.Println("  envis project-set [--project-id <uuid>]")
+	fmt.Println("  envis project-create [--name <name>]")
+	fmt.Println("  envis project-rename [--project-id <uuid>] [--name <new-name>]")
+	fmt.Println("  envis project-delete [--project-id <uuid>]")
+	fmt.Println("  envis project-members [--project-id <uuid>]")
+	fmt.Println("  envis project-member-remove [--project-id <uuid>] [--user-id <uuid>]")
 	fmt.Println("  envis get-many [--project-id <uuid>] <secret1> <secret2> ...")
 	fmt.Println("  envis invites")
-	fmt.Println("  envis invite-respond --invite-id <uuid> --accept|--reject")
-	fmt.Println("  envis invite-create --project-id <uuid> --email <user@example.com> [--role admin|member]")
+	fmt.Println("  envis invite-respond [--invite-id <uuid>] [--accept|--reject]")
+	fmt.Println("  envis invite-create [--project-id <uuid>] [--email <user@example.com>] [--role admin|member]")
 	fmt.Println("  envis status")
-	fmt.Println("  envis ci-token-generate --project-id <uuid>")
-	fmt.Println("  envis ci-token-reset --project-id <uuid>")
-	fmt.Println("  envis ci-token-verify --project-id <uuid> --token <token>")
+	fmt.Println("  envis ci-token-generate [--project-id <uuid>]")
+	fmt.Println("  envis ci-token-reset [--project-id <uuid>]")
+	fmt.Println("  envis ci-token-verify [--project-id <uuid>] [--token <token>]")
 	fmt.Println("  envis login")
 	fmt.Println("  envis logout")
 	fmt.Println("  envis update")
@@ -337,15 +364,26 @@ func runPull(cfg Config, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
+	outputProvided := flagWasPassed(fs, "output")
 
 	client, err := newHTTPClient(cfg)
 	if err != nil {
 		return err
+	}
+
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{
+		AllowManual: true,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !outputProvided && canPrompt(cfg) {
+		selected, err := promptText("Output file", *output, true)
+		if err != nil {
+			return err
+		}
+		*output = selected
 	}
 
 	secrets, err := getAllSecrets(client, cfg, projectID)
@@ -432,7 +470,7 @@ func runPull(cfg Config, args []string) error {
 		}
 	}
 
-	fmt.Printf("Wrote %d secret(s) to %s\n", len(secrets), *output)
+	successf("Wrote %d secret(s) to %s", len(secrets), *output)
 	return nil
 }
 
@@ -445,9 +483,26 @@ func runGetMany(cfg Config, args []string) error {
 		return err
 	}
 
+	client, err := newHTTPClient(cfg)
+	if err != nil {
+		return err
+	}
+
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
 	rawNames := fs.Args()
 	if len(rawNames) == 0 {
-		return errors.New("get-many requires at least one secret name")
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("secret names", "pass names as positional arguments")
+		}
+		line, err := promptText("Secret names (space separated)", "", true)
+		if err != nil {
+			return err
+		}
+		rawNames = strings.Fields(line)
 	}
 
 	names := make([]string, 0, len(rawNames))
@@ -457,16 +512,6 @@ func runGetMany(cfg Config, args []string) error {
 			return errors.New("get-many requires non-empty secret names")
 		}
 		names = append(names, trimmed)
-	}
-
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
-	client, err := newHTTPClient(cfg)
-	if err != nil {
-		return err
 	}
 
 	secrets, err := getBatchSecrets(client, cfg, projectID, names)
@@ -502,10 +547,29 @@ func runPush(cfg Config, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	fileProvided := flagWasPassed(fs, "file")
 
-	projectID, err := resolveProjectID(*projectIDFlag)
+	client, err := newHTTPClient(cfg)
 	if err != nil {
 		return err
+	}
+
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{
+		AllowCreate: true,
+	})
+	if err != nil {
+		return err
+	}
+
+	if fileProvided && *envFile == "" {
+		return errors.New("source file cannot be empty")
+	}
+	if !fileProvided && canPrompt(cfg) {
+		selected, err := promptText("Source file", *envFile, true)
+		if err != nil {
+			return err
+		}
+		*envFile = selected
 	}
 
 	keys, values, err := parseEnvFile(*envFile)
@@ -516,9 +580,15 @@ func runPush(cfg Config, args []string) error {
 		return fmt.Errorf("no secrets found in %s", *envFile)
 	}
 
-	client, err := newHTTPClient(cfg)
-	if err != nil {
-		return err
+	if canPrompt(cfg) {
+		ok, err := promptConfirm(fmt.Sprintf("Found %d secrets. Push to project?", len(keys)), true)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Println("Push canceled.")
+			return nil
+		}
 	}
 
 	for _, name := range keys {
@@ -534,7 +604,7 @@ func runPush(cfg Config, args []string) error {
 		}
 	}
 
-	fmt.Printf("Pushed %d secret(s) from %s\n", len(keys), *envFile)
+	successf("Pushed %d secret(s)", len(keys))
 	return nil
 }
 
@@ -547,12 +617,12 @@ func runSecretNames(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
+	client, err := newHTTPClient(cfg)
 	if err != nil {
 		return err
 	}
 
-	client, err := newHTTPClient(cfg)
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
 	if err != nil {
 		return err
 	}
@@ -579,19 +649,25 @@ func runSecretGet(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
+	client, err := newHTTPClient(cfg)
+	if err != nil {
+		return err
+	}
+
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
 	if err != nil {
 		return err
 	}
 
 	secretName := strings.TrimSpace(*name)
 	if secretName == "" {
-		return errors.New("missing secret name: pass --name")
-	}
-
-	client, err := newHTTPClient(cfg)
-	if err != nil {
-		return err
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("secret name", "pass --name")
+		}
+		secretName, err = promptText("Secret name", "", true)
+		if err != nil {
+			return err
+		}
 	}
 
 	value, err := getSecret(client, cfg, projectID, secretName)
@@ -621,20 +697,6 @@ func runSecretSet(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
-	secretName := strings.TrimSpace(*name)
-	if secretName == "" {
-		return errors.New("missing secret name: pass --name")
-	}
-	if !valueProvided {
-		return errors.New("missing secret value: pass --value")
-	}
-	secretValue := *value
-
 	if cfg.CIToken != "" {
 		return errors.New("secret-set command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -644,11 +706,39 @@ func runSecretSet(cfg Config, args []string) error {
 		return err
 	}
 
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
+	secretName := strings.TrimSpace(*name)
+	if secretName == "" {
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("secret name", "pass --name")
+		}
+		secretName, err = promptText("Secret name", "", true)
+		if err != nil {
+			return err
+		}
+	}
+	var secretValue string
+	if valueProvided {
+		secretValue = *value
+	} else {
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("secret value", "pass --value")
+		}
+		secretValue, err = promptSecret("Value")
+		if err != nil {
+			return err
+		}
+	}
+
 	if err := upsertSecret(client, cfg, projectID, secretName, secretValue); err != nil {
 		return err
 	}
 
-	fmt.Printf("Secret %s updated.\n", secretName)
+	successf("Secret saved")
 	return nil
 }
 
@@ -662,16 +752,6 @@ func runSecretDelete(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
-	secretName := strings.TrimSpace(*name)
-	if secretName == "" {
-		return errors.New("missing secret name: pass --name")
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("secret-delete command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -681,11 +761,38 @@ func runSecretDelete(cfg Config, args []string) error {
 		return err
 	}
 
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
+	secretName := strings.TrimSpace(*name)
+	if secretName == "" {
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("secret name", "pass --name")
+		}
+		secretName, err = promptText("Secret name", "", true)
+		if err != nil {
+			return err
+		}
+	}
+
+	if canPrompt(cfg) {
+		ok, err := promptConfirm(fmt.Sprintf("Delete %s? This cannot be undone.", secretName), false)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Println("Delete canceled.")
+			return nil
+		}
+	}
+
 	if err := deleteSecret(client, cfg, projectID, secretName); err != nil {
 		return err
 	}
 
-	fmt.Printf("Secret %s deleted.\n", secretName)
+	successf("Deleted")
 	return nil
 }
 
@@ -720,9 +827,8 @@ func runProjects(cfg Config, args []string) error {
 		return nil
 	}
 
-	sort.Slice(projects, func(i, j int) bool {
-		return strings.ToLower(projects[i].Name) < strings.ToLower(projects[j].Name)
-	})
+	sortProjects(projects)
+	defaultProjectID, _, _ := resolveConfiguredProjectID("")
 
 	for _, project := range projects {
 		role := strings.TrimSpace(project.Role)
@@ -733,7 +839,11 @@ func runProjects(cfg Config, args []string) error {
 		if project.CITokenSet {
 			ciTokenStatus = "yes"
 		}
-		fmt.Printf("%s\t%s\t%s\t%s\n", project.ProjectID, project.Name, role, ciTokenStatus)
+		marker := " "
+		if strings.TrimSpace(project.ProjectID) == defaultProjectID {
+			marker = "*"
+		}
+		fmt.Printf("%s %s\t%s\tci-token:%s\n", marker, projectDisplayName(project), role, ciTokenStatus)
 	}
 	return nil
 }
@@ -748,14 +858,34 @@ func runProjectSet(cfg Config, args []string) error {
 	}
 
 	projectID := strings.TrimSpace(*projectIDFlag)
+	projectLabel := ""
 	if projectID == "" {
-		return errors.New("missing project id: pass --project-id")
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("project id", "pass --project-id")
+		}
+		if cfg.CIToken != "" {
+			return errors.New("project-set command requires user auth (ENVIS_CI_TOKEN is not supported)")
+		}
+		client, err := newHTTPClient(cfg)
+		if err != nil {
+			return err
+		}
+		project, err := promptProjectSelection(cfg, client, ProjectResolutionOptions{})
+		if err != nil {
+			return err
+		}
+		projectID = strings.TrimSpace(project.ProjectID)
+		projectLabel = projectDisplayName(project)
 	}
 
 	if err := writeProjectID(cfg.ProjectPath, projectID); err != nil {
 		return err
 	}
-	fmt.Printf("Default project set to %s\n", projectID)
+	if projectLabel == "" {
+		successf("Default project set")
+	} else {
+		successf("Default project set to %s", projectLabel)
+	}
 	return nil
 }
 
@@ -770,7 +900,14 @@ func runProjectCreate(cfg Config, args []string) error {
 
 	projectName := strings.TrimSpace(*name)
 	if projectName == "" {
-		return errors.New("missing project name: pass --name")
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("project name", "pass --name")
+		}
+		var err error
+		projectName, err = promptText("Project name", "", true)
+		if err != nil {
+			return err
+		}
 	}
 
 	if cfg.CIToken != "" {
@@ -787,7 +924,19 @@ func runProjectCreate(cfg Config, args []string) error {
 		return err
 	}
 
-	fmt.Printf("Project created: %s\t%s\n", project.ProjectID, project.Name)
+	successf("Project created: %s", project.Name)
+	if canPrompt(cfg) {
+		ok, err := promptConfirm("Set as default project?", true)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := writeProjectID(cfg.ProjectPath, project.ProjectID); err != nil {
+				return err
+			}
+			successf("Default project set")
+		}
+	}
 	return nil
 }
 
@@ -801,16 +950,6 @@ func runProjectRename(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
-	newName := strings.TrimSpace(*name)
-	if newName == "" {
-		return errors.New("missing project name: pass --name")
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("project-rename command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -820,12 +959,32 @@ func runProjectRename(cfg Config, args []string) error {
 		return err
 	}
 
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
+	newName := strings.TrimSpace(*name)
+	if newName == "" {
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("project name", "pass --name")
+		}
+		defaultName := ""
+		if project, err := getProjectByID(client, cfg, projectID); err == nil && project != nil {
+			defaultName = strings.TrimSpace(project.Name)
+		}
+		newName, err = promptText("New name", defaultName, true)
+		if err != nil {
+			return err
+		}
+	}
+
 	project, err := renameProject(client, cfg, projectID, newName)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Project renamed: %s\t%s\n", project.ProjectID, project.Name)
+	successf("Renamed to %s", project.Name)
 	return nil
 }
 
@@ -838,11 +997,6 @@ func runProjectDelete(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("project-delete command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -852,11 +1006,32 @@ func runProjectDelete(cfg Config, args []string) error {
 		return err
 	}
 
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
+	if canPrompt(cfg) {
+		projectName := projectID
+		if project, err := getProjectByID(client, cfg, projectID); err == nil && project != nil && strings.TrimSpace(project.Name) != "" {
+			projectName = strings.TrimSpace(project.Name)
+		}
+		warnf("This will delete all secrets in this project.")
+		typed, err := promptText("Type the project name to confirm", "", true)
+		if err != nil {
+			return err
+		}
+		if typed != projectName {
+			fmt.Println("Delete canceled.")
+			return nil
+		}
+	}
+
 	if err := deleteProject(client, cfg, projectID); err != nil {
 		return err
 	}
 
-	fmt.Printf("Project %s deleted.\n", projectID)
+	successf("Deleted")
 	return nil
 }
 
@@ -869,16 +1044,16 @@ func runProjectMembers(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("project-members command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
 
 	client, err := newHTTPClient(cfg)
+	if err != nil {
+		return err
+	}
+
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
 	if err != nil {
 		return err
 	}
@@ -894,13 +1069,11 @@ func runProjectMembers(cfg Config, args []string) error {
 	}
 
 	for _, member := range resp.Members {
-		name := strings.TrimSpace(member.Name)
-		email := strings.TrimSpace(member.Email)
 		role := strings.TrimSpace(member.Role)
 		if role == "" {
 			role = "member"
 		}
-		fmt.Printf("%s\t%s\t%s\t%s\n", strings.TrimSpace(member.ID), role, name, email)
+		fmt.Printf("%s\t%s\n", memberDisplayName(member), role)
 	}
 	return nil
 }
@@ -915,16 +1088,6 @@ func runProjectMemberRemove(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
-	userID := strings.TrimSpace(*userIDFlag)
-	if userID == "" {
-		return errors.New("missing user id: pass --user-id")
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("project-member-remove command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -934,11 +1097,54 @@ func runProjectMemberRemove(cfg Config, args []string) error {
 		return err
 	}
 
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
+	userID := strings.TrimSpace(*userIDFlag)
+	memberLabel := userID
+	if userID == "" {
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("user id", "pass --user-id")
+		}
+		resp, err := listProjectMembers(client, cfg, projectID)
+		if err != nil {
+			return err
+		}
+		var members []ProjectMember
+		var options []string
+		for _, member := range resp.Members {
+			if strings.TrimSpace(member.ID) == "" {
+				continue
+			}
+			members = append(members, member)
+			options = append(options, memberDisplayName(member))
+		}
+		index, err := promptSelect("Select member to remove", options)
+		if err != nil {
+			return err
+		}
+		userID = strings.TrimSpace(members[index].ID)
+		memberLabel = memberDisplayName(members[index])
+	}
+
+	if canPrompt(cfg) {
+		ok, err := promptConfirm(fmt.Sprintf("Remove %s?", memberLabel), false)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Println("Remove canceled.")
+			return nil
+		}
+	}
+
 	if err := removeProjectMember(client, cfg, projectID, userID); err != nil {
 		return err
 	}
 
-	fmt.Printf("Removed member %s from project %s.\n", userID, projectID)
+	successf("Removed")
 	return nil
 }
 
@@ -951,11 +1157,6 @@ func runCiTokenGenerate(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("ci-token-generate command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -965,13 +1166,20 @@ func runCiTokenGenerate(cfg Config, args []string) error {
 		return err
 	}
 
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
+	if canPrompt(cfg) {
+		warnf("Store this token securely. It will not be shown again.")
+	}
 	token, err := generateCIToken(client, cfg, projectID)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("CI token generated (store this now, it won't be shown again):")
-	fmt.Println(token)
+	successf("Token: %s", token)
 	return nil
 }
 
@@ -984,11 +1192,6 @@ func runCiTokenReset(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("ci-token-reset command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -998,13 +1201,29 @@ func runCiTokenReset(cfg Config, args []string) error {
 		return err
 	}
 
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
+	if canPrompt(cfg) {
+		warnf("This will invalidate the existing CI token immediately.")
+		ok, err := promptConfirm("Confirm reset?", false)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Println("Reset canceled.")
+			return nil
+		}
+	}
+
 	token, err := generateCIToken(client, cfg, projectID)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("CI token reset (store this now, it won't be shown again):")
-	fmt.Println(token)
+	successf("New token: %s", token)
 	return nil
 }
 
@@ -1025,18 +1244,6 @@ func runCiTokenVerify(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
-	if !tokenProvided {
-		return errors.New("missing token: pass --token")
-	}
-	if strings.TrimSpace(*token) == "" {
-		return errors.New("token cannot be empty")
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("ci-token-verify command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -1046,15 +1253,31 @@ func runCiTokenVerify(cfg Config, args []string) error {
 		return err
 	}
 
-	ok, err := verifyCIToken(client, cfg, projectID, *token)
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
+	tokenValue := strings.TrimSpace(*token)
+	if !tokenProvided || tokenValue == "" {
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("token", "pass --token")
+		}
+		tokenValue, err = promptSecret("Token")
+		if err != nil {
+			return err
+		}
+	}
+
+	ok, err := verifyCIToken(client, cfg, projectID, tokenValue)
 	if err != nil {
 		return err
 	}
 
 	if ok {
-		fmt.Println("CI token is valid.")
+		successf("Valid")
 	} else {
-		fmt.Println("CI token is invalid.")
+		fmt.Println("✗ Invalid")
 	}
 	return nil
 }
@@ -1086,12 +1309,7 @@ func runInvites(cfg Config, args []string) error {
 	}
 
 	for _, invite := range invites {
-		fmt.Printf("%s\t%s\t%s\t%s\n",
-			strings.TrimSpace(invite.ID),
-			strings.TrimSpace(invite.InviterName),
-			strings.TrimSpace(invite.InviterEmail),
-			strings.TrimSpace(invite.ProjectName),
-		)
+		fmt.Printf("%s\tfrom %s\n", inviteProjectDisplayName(invite), inviteFromDisplayName(invite))
 	}
 
 	return nil
@@ -1108,14 +1326,6 @@ func runInviteRespond(cfg Config, args []string) error {
 		return err
 	}
 
-	inviteID := strings.TrimSpace(*inviteIDFlag)
-	if inviteID == "" {
-		return errors.New("missing invite id: pass --invite-id")
-	}
-	if *accept == *reject {
-		return errors.New("choose exactly one of --accept or --reject")
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("invite-respond command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -1125,8 +1335,39 @@ func runInviteRespond(cfg Config, args []string) error {
 		return err
 	}
 
+	inviteID := strings.TrimSpace(*inviteIDFlag)
+	if inviteID == "" {
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("invite id", "pass --invite-id")
+		}
+		invites, err := listMyInvites(client, cfg)
+		if err != nil {
+			return err
+		}
+		options := make([]string, 0, len(invites))
+		for _, invite := range invites {
+			options = append(options, inviteDisplayName(invite))
+		}
+		index, err := promptSelect("Select invite", options)
+		if err != nil {
+			return err
+		}
+		inviteID = strings.TrimSpace(invites[index].ID)
+	}
+
 	action := "accept"
-	if *reject {
+	if *accept == *reject {
+		if !canPrompt(cfg) {
+			return errors.New("choose exactly one of --accept or --reject")
+		}
+		index, err := promptSelect("Accept or reject?", []string{"Accept", "Reject"})
+		if err != nil {
+			return err
+		}
+		if index == 1 {
+			action = "reject"
+		}
+	} else if *reject {
 		action = "reject"
 	}
 
@@ -1135,7 +1376,11 @@ func runInviteRespond(cfg Config, args []string) error {
 		return err
 	}
 
-	fmt.Printf("Invite %s %s.\n", updated.ID, updated.Status)
+	if action == "accept" {
+		successf("Joined %s", strings.TrimSpace(updated.ProjectName))
+	} else {
+		successf("Invite rejected")
+	}
 	return nil
 }
 
@@ -1150,23 +1395,6 @@ func runInviteCreate(cfg Config, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveProjectID(*projectIDFlag)
-	if err != nil {
-		return err
-	}
-
-	recipient := strings.TrimSpace(*email)
-	if recipient == "" {
-		return errors.New("missing email: pass --email")
-	}
-	inviteRole := strings.ToLower(strings.TrimSpace(*role))
-	if inviteRole == "" {
-		inviteRole = "member"
-	}
-	if inviteRole != "admin" && inviteRole != "member" {
-		return errors.New("invalid role: must be admin or member")
-	}
-
 	if cfg.CIToken != "" {
 		return errors.New("invite-create command requires user auth (ENVIS_CI_TOKEN is not supported)")
 	}
@@ -1176,12 +1404,36 @@ func runInviteCreate(cfg Config, args []string) error {
 		return err
 	}
 
+	projectID, err := resolveProjectIDInteractive(cfg, client, *projectIDFlag, ProjectResolutionOptions{})
+	if err != nil {
+		return err
+	}
+
+	recipient := strings.TrimSpace(*email)
+	if recipient == "" {
+		if !canPrompt(cfg) {
+			return nonInteractiveInputError("email", "pass --email")
+		}
+		recipient, err = promptText("Email", "", true)
+		if err != nil {
+			return err
+		}
+	}
+	inviteRole := strings.ToLower(strings.TrimSpace(*role))
+	if inviteRole == "" {
+		inviteRole = "member"
+	}
+	if inviteRole != "admin" && inviteRole != "member" {
+		return errors.New("invalid role: must be admin or member")
+	}
+
 	invite, err := createInvite(client, cfg, projectID, recipient, inviteRole)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Invite created: %s\n", invite.ID)
+	_ = invite
+	successf("Invite sent to %s", recipient)
 	return nil
 }
 
@@ -1197,6 +1449,7 @@ func runStatus(cfg Config, args []string) error {
 	if cfg.CIToken != "" {
 		fmt.Println("Auth mode: ci-token")
 		fmt.Println("Signed in: yes (ci-token)")
+		printConfiguredProjectStatus(nil, cfg)
 		return nil
 	}
 
@@ -1205,6 +1458,7 @@ func runStatus(cfg Config, args []string) error {
 		if errors.Is(err, os.ErrNotExist) {
 			fmt.Println("Auth mode: user")
 			fmt.Println("Signed in: no")
+			printConfiguredProjectStatus(nil, cfg)
 			return nil
 		}
 		return err
@@ -1213,6 +1467,7 @@ func runStatus(cfg Config, args []string) error {
 	if session.AccessToken == "" && session.RefreshToken == "" {
 		fmt.Println("Auth mode: user")
 		fmt.Println("Signed in: no (invalid session)")
+		printConfiguredProjectStatus(nil, cfg)
 		return nil
 	}
 
@@ -1244,8 +1499,8 @@ func runStatus(cfg Config, args []string) error {
 	if err != nil {
 		fmt.Println("Auth mode: user")
 		fmt.Println("Signed in: yes")
-		fmt.Printf("User ID: %s\n", strings.TrimSpace(sessionUserID(session)))
 		fmt.Printf("User info unavailable: %v\n", err)
+		printConfiguredProjectStatus(client, cfg)
 		return nil
 	}
 
@@ -1254,12 +1509,10 @@ func runStatus(cfg Config, args []string) error {
 	if strings.TrimSpace(profile.Email) != "" {
 		fmt.Printf("Email: %s\n", strings.TrimSpace(profile.Email))
 	}
-	if strings.TrimSpace(profile.ID) != "" {
-		fmt.Printf("User ID: %s\n", strings.TrimSpace(profile.ID))
-	}
 	if strings.TrimSpace(profile.Name) != "" {
 		fmt.Printf("Name: %s\n", strings.TrimSpace(profile.Name))
 	}
+	printConfiguredProjectStatus(client, cfg)
 	return nil
 }
 
@@ -1332,19 +1585,329 @@ func runUninstall(args []string) error {
 	return nil
 }
 
-func resolveProjectID(flagValue string) (string, error) {
+func canPrompt(cfg Config) bool {
+	if cfg.CIToken != "" {
+		return false
+	}
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
+}
+
+func nonInteractiveInputError(name, hint string) error {
+	if hint == "" {
+		return fmt.Errorf("missing %s in non-interactive mode", name)
+	}
+	return fmt.Errorf("missing %s in non-interactive mode: %s", name, hint)
+}
+
+func promptText(label, defaultValue string, required bool) (string, error) {
+	for {
+		if defaultValue != "" {
+			fmt.Fprintf(os.Stderr, "? %s: (%s) ", label, defaultValue)
+		} else {
+			fmt.Fprintf(os.Stderr, "? %s: ", label)
+		}
+
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		value := strings.TrimSpace(line)
+		if value == "" {
+			value = defaultValue
+		}
+		if value != "" || !required {
+			return value, nil
+		}
+		fmt.Fprintln(os.Stderr, "Value is required.")
+	}
+}
+
+func promptSecret(label string) (string, error) {
+	for {
+		fmt.Fprintf(os.Stderr, "? %s: ", label)
+		value, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", err
+		}
+		if len(value) > 0 {
+			return string(value), nil
+		}
+		fmt.Fprintln(os.Stderr, "Value is required.")
+	}
+}
+
+func promptConfirm(label string, defaultYes bool) (bool, error) {
+	suffix := "(y/N)"
+	if defaultYes {
+		suffix = "(Y/n)"
+	}
+	for {
+		fmt.Fprintf(os.Stderr, "? %s %s ", label, suffix)
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return false, err
+		}
+		answer := strings.ToLower(strings.TrimSpace(line))
+		if answer == "" {
+			return defaultYes, nil
+		}
+		switch answer {
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		default:
+			fmt.Fprintln(os.Stderr, "Enter y or n.")
+		}
+	}
+}
+
+func promptSelect(label string, options []string) (int, error) {
+	if len(options) == 0 {
+		return -1, errors.New("no options available")
+	}
+	if len(options) == 1 {
+		return 0, nil
+	}
+
+	fmt.Fprintf(os.Stderr, "? %s:\n", label)
+	for i, option := range options {
+		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, option)
+	}
+	for {
+		fmt.Fprintf(os.Stderr, "Select 1-%d: ", len(options))
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return -1, err
+		}
+		value, err := strconv.Atoi(strings.TrimSpace(line))
+		if err == nil && value >= 1 && value <= len(options) {
+			return value - 1, nil
+		}
+		fmt.Fprintln(os.Stderr, "Enter a valid number.")
+	}
+}
+
+func flagWasPassed(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func successf(format string, args ...interface{}) {
+	fmt.Printf("✓ "+format+"\n", args...)
+}
+
+func warnf(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "⚠ "+format+"\n", args...)
+}
+
+func printConfiguredProjectStatus(client *http.Client, cfg Config) {
+	projectID, ok, err := resolveConfiguredProjectID("")
+	if err != nil {
+		fmt.Printf("Current project: unavailable (%v)\n", err)
+		return
+	}
+	if !ok {
+		fmt.Println("Current project: not set")
+		return
+	}
+	if client == nil {
+		if strings.TrimSpace(os.Getenv("ENVIS_PROJECT_ID")) != "" {
+			fmt.Println("Current project: set via ENVIS_PROJECT_ID")
+			return
+		}
+		fmt.Println("Current project: set")
+		return
+	}
+	project, err := getProjectByID(client, cfg, projectID)
+	if err != nil {
+		fmt.Printf("Current project: set (details unavailable: %v)\n", err)
+		return
+	}
+	if project == nil {
+		fmt.Println("Current project: set (not found in your projects)")
+		return
+	}
+	fmt.Printf("Current project: %s\n", projectDisplayName(*project))
+}
+
+func resolveConfiguredProjectID(flagValue string) (string, bool, error) {
 	if strings.TrimSpace(flagValue) != "" {
-		return strings.TrimSpace(flagValue), nil
+		return strings.TrimSpace(flagValue), true, nil
 	}
 
 	if value := strings.TrimSpace(os.Getenv("ENVIS_PROJECT_ID")); value != "" {
-		return value, nil
+		return value, true, nil
 	}
 
 	if value, err := readProjectID(); err == nil && value != "" {
-		return value, nil
+		return value, true, nil
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+
+	return "", false, nil
+}
+
+func resolveProjectIDInteractive(cfg Config, client *http.Client, flagValue string, opts ProjectResolutionOptions) (string, error) {
+	if projectID, ok, err := resolveConfiguredProjectID(flagValue); err != nil {
 		return "", err
+	} else if ok {
+		return projectID, nil
+	}
+
+	if !canPrompt(cfg) {
+		return "", nonInteractiveInputError("project id", "pass --project-id, set ENVIS_PROJECT_ID, or run `envis project-set`")
+	}
+
+	fmt.Fprintln(os.Stderr, "No default project set.")
+	project, err := promptProjectSelection(cfg, client, opts)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(project.ProjectID), nil
+}
+
+func promptProjectSelection(cfg Config, client *http.Client, opts ProjectResolutionOptions) (Project, error) {
+	label := strings.TrimSpace(opts.Prompt)
+	if label == "" {
+		label = "Select a project"
+	}
+
+	projects, err := listProjects(client, cfg)
+	if err != nil {
+		return Project{}, err
+	}
+	sortProjects(projects)
+
+	if len(projects) == 1 {
+		return projects[0], nil
+	}
+
+	options := make([]string, 0, len(projects)+2)
+	for _, project := range projects {
+		options = append(options, projectDisplayName(project))
+	}
+	createIndex := -1
+	manualIndex := -1
+	if opts.AllowCreate {
+		createIndex = len(options)
+		options = append(options, "+ Create new project")
+	}
+	if opts.AllowManual {
+		manualIndex = len(options)
+		options = append(options, "+ Set manually")
+	}
+
+	if len(options) == 0 {
+		if !opts.AllowCreate && !opts.AllowManual {
+			return Project{}, errors.New("no projects found")
+		}
+		if opts.AllowCreate {
+			createIndex = len(options)
+			options = append(options, "+ Create new project")
+		}
+		if opts.AllowManual {
+			manualIndex = len(options)
+			options = append(options, "+ Set manually")
+		}
+	}
+
+	index, err := promptSelect(label, options)
+	if err != nil {
+		return Project{}, err
+	}
+	switch index {
+	case createIndex:
+		name, err := promptText("Project name", "", true)
+		if err != nil {
+			return Project{}, err
+		}
+		project, err := createProject(client, cfg, name)
+		if err != nil {
+			return Project{}, err
+		}
+		successf("Project created: %s", project.Name)
+		return project, nil
+	case manualIndex:
+		projectID, err := promptText("Project ID", "", true)
+		if err != nil {
+			return Project{}, err
+		}
+		return Project{ProjectID: projectID, Name: projectID}, nil
+	default:
+		if index < 0 || index >= len(projects) {
+			return Project{}, errors.New("invalid project selection")
+		}
+		return projects[index], nil
+	}
+}
+
+func sortProjects(projects []Project) {
+	sort.Slice(projects, func(i, j int) bool {
+		return strings.ToLower(projects[i].Name) < strings.ToLower(projects[j].Name)
+	})
+}
+
+func projectDisplayName(project Project) string {
+	name := strings.TrimSpace(project.Name)
+	if name == "" {
+		return "Unnamed project"
+	}
+	return name
+}
+
+func memberDisplayName(member ProjectMember) string {
+	email := strings.TrimSpace(member.Email)
+	if email != "" {
+		return email
+	}
+	name := strings.TrimSpace(member.Name)
+	if name != "" {
+		return name
+	}
+	return "Unknown member"
+}
+
+func inviteDisplayName(invite Invite) string {
+	project := inviteProjectDisplayName(invite)
+	from := inviteFromDisplayName(invite)
+	if from == "" {
+		return project
+	}
+	return fmt.Sprintf("%s (from %s)", project, from)
+}
+
+func inviteProjectDisplayName(invite Invite) string {
+	project := strings.TrimSpace(invite.ProjectName)
+	if project == "" {
+		return "Unknown project"
+	}
+	return project
+}
+
+func inviteFromDisplayName(invite Invite) string {
+	from := strings.TrimSpace(invite.InviterEmail)
+	if from == "" {
+		from = strings.TrimSpace(invite.InviterName)
+	}
+	if from == "" {
+		return "unknown sender"
+	}
+	return from
+}
+
+func resolveProjectID(flagValue string) (string, error) {
+	if projectID, ok, err := resolveConfiguredProjectID(flagValue); err != nil {
+		return "", err
+	} else if ok {
+		return projectID, nil
 	}
 
 	return "", errors.New("missing project id: pass --project-id, set ENVIS_PROJECT_ID, or run `envis project-set`")
@@ -1577,7 +2140,14 @@ func performDeviceLogin(cfg Config) (Session, error) {
 				time.Sleep(retryAfterOrDefault(resp.Header.Get("Retry-After"), defaultPollDelay))
 				continue
 			}
-			return Session{}, fmt.Errorf("auth endpoint returned invalid JSON (status %d)", resp.StatusCode)
+			preview := strings.TrimSpace(string(body))
+			if preview == "" {
+				preview = "<empty body>"
+			}
+			if len(preview) > 200 {
+				preview = preview[:200]
+			}
+			return Session{}, fmt.Errorf("auth endpoint returned invalid JSON (status %d): %s", resp.StatusCode, preview)
 		}
 
 		if resp.StatusCode == http.StatusOK && payload.IsAuth {
@@ -1947,6 +2517,9 @@ func doJSONRequest(client *http.Client, method, endpoint string, body []byte) ([
 		return nil, err
 	}
 
+	stopSpinner := startSpinner("Contacting Envisible")
+	defer stopSpinner()
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -1959,6 +2532,34 @@ func doJSONRequest(client *http.Client, method, endpoint string, body []byte) ([
 	}
 
 	return respBody, nil
+}
+
+func startSpinner(label string) func() {
+	if !term.IsTerminal(int(os.Stderr.Fd())) {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		frames := []string{"-", "\\", "|", "/"}
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		i := 0
+		for {
+			select {
+			case <-done:
+				fmt.Fprint(os.Stderr, "\r\033[K")
+				return
+			case <-ticker.C:
+				fmt.Fprintf(os.Stderr, "\r%s %s", frames[i%len(frames)], label)
+				i++
+			}
+		}
+	}()
+
+	return func() {
+		close(done)
+	}
 }
 
 type headerRoundTripper struct {
