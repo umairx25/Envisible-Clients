@@ -1935,7 +1935,7 @@ func newConfig() (Config, error) {
 		apiVersion = strings.ToLower(strings.TrimSpace(os.Getenv("VERSION")))
 	}
 	if apiVersion == "" {
-		apiVersion = "v1"
+		apiVersion = "v2"
 	}
 	if apiVersion != "v1" && apiVersion != "v2" {
 		return Config{}, fmt.Errorf("invalid version %q: expected v1 or v2", apiVersion)
