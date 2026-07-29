@@ -94,6 +94,18 @@ ENVIS_CI_TOKEN=<token> ENVIS_PROJECT_ID=<uuid> ./envis secret-get --name API_KEY
 
 When `ENVIS_CI_TOKEN` is set, the CLI never prompts. Missing required inputs must be supplied with flags or environment variables.
 
+### API version
+
+Set `version=v2` to use v2 endpoints for authenticated CLI requests. When unset, the CLI keeps the legacy v1 routes.
+
+For local development, set both the API and dashboard URLs:
+
+```env
+LOCAL_URI=http://localhost:8000
+DASHBOARD_URI=http://localhost:3000
+version=v2
+```
+
 ### Log out
 
 ```bash

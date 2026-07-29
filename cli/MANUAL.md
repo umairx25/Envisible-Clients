@@ -34,6 +34,15 @@ CI token auth:
 `ENVIS_CI_TOKEN`
 - Use CI-token auth instead of user auth.
 
+`LOCAL_URI`
+- API base URL override for local development.
+
+`DASHBOARD_URI`
+- Dashboard base URL override for browser device login.
+
+`version`
+- API version for authenticated CLI requests. Use `v1` for legacy routes or `v2` for the v2 API. Defaults to `v1`.
+
 ## Commands
 Run `envis help <command>` for details.
 

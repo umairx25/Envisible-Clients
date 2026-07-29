@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"golang.org/x/term"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,7 +23,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"golang.org/x/term"
 )
 
 const (
@@ -40,6 +40,7 @@ var manual string
 type Config struct {
 	BaseURL      string
 	DashboardURL string
+	APIVersion   string
 	SessionPath  string
 	CIToken      string
 	ProjectPath  string
@@ -49,6 +50,8 @@ type Session struct {
 	AccessToken  string                 `json:"access_token"`
 	RefreshToken string                 `json:"refresh_token"`
 	ExpiresAt    int64                  `json:"expires_at"`
+	ExpiresIn    int                    `json:"expires_in,omitempty"`
+	TokenType    string                 `json:"token_type,omitempty"`
 	User         map[string]interface{} `json:"user"`
 }
 
@@ -1924,14 +1927,43 @@ func newConfig() (Config, error) {
 		baseURL = strings.TrimRight(localURI, "/")
 	}
 	dashURL := strings.TrimRight(defaultDashboardURL, "/")
+	if dashboardURI := strings.TrimSpace(os.Getenv("DASHBOARD_URI")); dashboardURI != "" {
+		dashURL = strings.TrimRight(dashboardURI, "/")
+	}
+	apiVersion := strings.ToLower(strings.TrimSpace(os.Getenv("version")))
+	if apiVersion == "" {
+		apiVersion = strings.ToLower(strings.TrimSpace(os.Getenv("VERSION")))
+	}
+	if apiVersion == "" {
+		apiVersion = "v1"
+	}
+	if apiVersion != "v1" && apiVersion != "v2" {
+		return Config{}, fmt.Errorf("invalid version %q: expected v1 or v2", apiVersion)
+	}
 
 	return Config{
 		BaseURL:      baseURL,
 		DashboardURL: dashURL,
+		APIVersion:   apiVersion,
 		SessionPath:  filepath.Join(home, ".envis", "session.json"),
 		ProjectPath:  filepath.Join(home, ".envis", "project_id"),
 		CIToken:      strings.TrimSpace(os.Getenv("ENVIS_CI_TOKEN")),
 	}, nil
+}
+
+func authEndpoint(cfg Config, suffix string) string {
+	return cfg.BaseURL + "/" + cfg.APIVersion + "/auth" + suffix
+}
+
+func currentUserEndpoint(cfg Config) string {
+	if cfg.APIVersion == "v2" {
+		return authEndpoint(cfg, "/me")
+	}
+	return cfg.BaseURL + "/" + cfg.APIVersion + "/me"
+}
+
+func apiEndpoint(cfg Config, path string) string {
+	return cfg.BaseURL + "/" + cfg.APIVersion + path
 }
 
 func newHTTPClient(cfg Config) (*http.Client, error) {
@@ -2065,7 +2097,7 @@ func refreshSession(cfg Config, session Session) (Session, error) {
 		return Session{}, errors.New("session expired and no refresh token is available; run `envis login`")
 	}
 
-	endpoint := cfg.BaseURL + "/v1/auth/refresh"
+	endpoint := authEndpoint(cfg, "/refresh")
 	body := map[string]string{"refresh_token": session.RefreshToken}
 	bodyJSON, _ := json.Marshal(body)
 
@@ -2115,7 +2147,7 @@ func performDeviceLogin(cfg Config) (Session, error) {
 	}
 	fmt.Println("Waiting for approval...")
 
-	endpoint := cfg.BaseURL + "/v1/auth/" + url.PathEscape(deviceCode)
+	endpoint := authEndpoint(cfg, "/"+url.PathEscape(deviceCode))
 	deadline := time.Now().Add(pollWaitTimeout)
 
 	for time.Now().Before(deadline) {
@@ -2177,7 +2209,7 @@ func performDeviceLogin(cfg Config) (Session, error) {
 }
 
 func listSecretNames(client *http.Client, cfg Config, projectID string) ([]string, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/secrets", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s/secrets", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	respBody, err := doJSONRequest(client, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -2196,7 +2228,7 @@ func getSecretNames(client *http.Client, cfg Config, projectID string) ([]string
 }
 
 func listProjects(client *http.Client, cfg Config) ([]Project, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects", cfg.BaseURL)
+	endpoint := apiEndpoint(cfg, "/projects")
 	respBody, err := doJSONRequest(client, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -2225,7 +2257,7 @@ func getProjectByID(client *http.Client, cfg Config, projectID string) (*Project
 }
 
 func getCurrentUserID(client *http.Client, cfg Config) (string, error) {
-	endpoint := fmt.Sprintf("%s/v1/me", cfg.BaseURL)
+	endpoint := currentUserEndpoint(cfg)
 	respBody, err := doJSONRequest(client, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
@@ -2233,7 +2265,7 @@ func getCurrentUserID(client *http.Client, cfg Config) (string, error) {
 
 	var user CurrentUser
 	if err := json.Unmarshal(respBody, &user); err != nil {
-		return "", fmt.Errorf("invalid /v1/me response: %w", err)
+		return "", fmt.Errorf("invalid /%s/me response: %w", cfg.APIVersion, err)
 	}
 	user.ID = strings.TrimSpace(user.ID)
 	if user.ID == "" {
@@ -2243,7 +2275,7 @@ func getCurrentUserID(client *http.Client, cfg Config) (string, error) {
 }
 
 func getCurrentUserProfile(client *http.Client, cfg Config) (CurrentUserProfile, error) {
-	endpoint := fmt.Sprintf("%s/v1/me", cfg.BaseURL)
+	endpoint := currentUserEndpoint(cfg)
 	respBody, err := doJSONRequest(client, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return CurrentUserProfile{}, err
@@ -2251,13 +2283,13 @@ func getCurrentUserProfile(client *http.Client, cfg Config) (CurrentUserProfile,
 
 	var user CurrentUserProfile
 	if err := json.Unmarshal(respBody, &user); err != nil {
-		return CurrentUserProfile{}, fmt.Errorf("invalid /v1/me response: %w", err)
+		return CurrentUserProfile{}, fmt.Errorf("invalid /%s/me response: %w", cfg.APIVersion, err)
 	}
 	return user, nil
 }
 
 func getSecret(client *http.Client, cfg Config, projectID string, name string) (string, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/secrets/%s", cfg.BaseURL, url.PathEscape(projectID), url.PathEscape(name))
+	endpoint := fmt.Sprintf("%s/projects/%s/secrets/%s", apiEndpoint(cfg, ""), url.PathEscape(projectID), url.PathEscape(name))
 	respBody, err := doJSONRequest(client, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
@@ -2272,7 +2304,7 @@ func getSecret(client *http.Client, cfg Config, projectID string, name string) (
 }
 
 func getAllSecrets(client *http.Client, cfg Config, projectID string) ([]SecretValue, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/secrets/all", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s/secrets/all", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	respBody, err := doJSONRequest(client, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -2286,7 +2318,7 @@ func getAllSecrets(client *http.Client, cfg Config, projectID string) ([]SecretV
 }
 
 func getBatchSecrets(client *http.Client, cfg Config, projectID string, names []string) ([]SecretValue, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/secrets/batch", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s/secrets/batch", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	payload := SecretsBatchRequest{Names: names}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -2306,7 +2338,7 @@ func getBatchSecrets(client *http.Client, cfg Config, projectID string, names []
 }
 
 func upsertSecret(client *http.Client, cfg Config, projectID string, name string, value string) error {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/secrets/%s", cfg.BaseURL, url.PathEscape(projectID), url.PathEscape(name))
+	endpoint := fmt.Sprintf("%s/projects/%s/secrets/%s", apiEndpoint(cfg, ""), url.PathEscape(projectID), url.PathEscape(name))
 	payload := SecretUpsertRequest{Value: value}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -2320,7 +2352,7 @@ func upsertSecret(client *http.Client, cfg Config, projectID string, name string
 }
 
 func deleteSecret(client *http.Client, cfg Config, projectID, name string) error {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/secrets/%s", cfg.BaseURL, url.PathEscape(projectID), url.PathEscape(name))
+	endpoint := fmt.Sprintf("%s/projects/%s/secrets/%s", apiEndpoint(cfg, ""), url.PathEscape(projectID), url.PathEscape(name))
 	if _, err := doJSONRequest(client, http.MethodDelete, endpoint, nil); err != nil {
 		return err
 	}
@@ -2328,7 +2360,7 @@ func deleteSecret(client *http.Client, cfg Config, projectID, name string) error
 }
 
 func createAuditEvent(client *http.Client, cfg Config, projectID, action, message string) error {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/audit", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s/audit", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	payload := AuditCreateRequest{
 		Action:  strings.TrimSpace(action),
 		Message: strings.TrimSpace(message),
@@ -2345,7 +2377,7 @@ func createAuditEvent(client *http.Client, cfg Config, projectID, action, messag
 }
 
 func listProjectMembers(client *http.Client, cfg Config, projectID string) (ProjectMembersResponse, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/members", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s/members", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	respBody, err := doJSONRequest(client, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return ProjectMembersResponse{}, err
@@ -2359,7 +2391,7 @@ func listProjectMembers(client *http.Client, cfg Config, projectID string) (Proj
 }
 
 func removeProjectMember(client *http.Client, cfg Config, projectID, userID string) error {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/members/%s", cfg.BaseURL, url.PathEscape(projectID), url.PathEscape(userID))
+	endpoint := fmt.Sprintf("%s/projects/%s/members/%s", apiEndpoint(cfg, ""), url.PathEscape(projectID), url.PathEscape(userID))
 	if _, err := doJSONRequest(client, http.MethodDelete, endpoint, nil); err != nil {
 		return err
 	}
@@ -2367,7 +2399,7 @@ func removeProjectMember(client *http.Client, cfg Config, projectID, userID stri
 }
 
 func listMyInvites(client *http.Client, cfg Config) ([]Invite, error) {
-	endpoint := fmt.Sprintf("%s/v1/me/invites", cfg.BaseURL)
+	endpoint := apiEndpoint(cfg, "/me/invites")
 	respBody, err := doJSONRequest(client, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -2386,7 +2418,7 @@ func respondToInvite(client *http.Client, cfg Config, inviteID string, action st
 		return Invite{}, errors.New("action must be accept or reject")
 	}
 
-	endpoint := fmt.Sprintf("%s/v1/invites/%s/%s", cfg.BaseURL, url.PathEscape(inviteID), action)
+	endpoint := fmt.Sprintf("%s/invites/%s/%s", apiEndpoint(cfg, ""), url.PathEscape(inviteID), action)
 	respBody, err := doJSONRequest(client, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return Invite{}, err
@@ -2400,7 +2432,7 @@ func respondToInvite(client *http.Client, cfg Config, inviteID string, action st
 }
 
 func createInvite(client *http.Client, cfg Config, projectID, email, role string) (Invite, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/invite", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s/invite", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	payload := InviteCreateRequest{Email: strings.TrimSpace(email), Role: role}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -2420,7 +2452,7 @@ func createInvite(client *http.Client, cfg Config, projectID, email, role string
 }
 
 func createProject(client *http.Client, cfg Config, name string) (Project, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects", cfg.BaseURL)
+	endpoint := apiEndpoint(cfg, "/projects")
 	payload := ProjectCreateRequest{Name: strings.TrimSpace(name)}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -2440,7 +2472,7 @@ func createProject(client *http.Client, cfg Config, name string) (Project, error
 }
 
 func renameProject(client *http.Client, cfg Config, projectID, newName string) (Project, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	payload := ProjectRenameRequest{NewName: strings.TrimSpace(newName)}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -2460,7 +2492,7 @@ func renameProject(client *http.Client, cfg Config, projectID, newName string) (
 }
 
 func deleteProject(client *http.Client, cfg Config, projectID string) error {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	if _, err := doJSONRequest(client, http.MethodDelete, endpoint, nil); err != nil {
 		return err
 	}
@@ -2468,7 +2500,7 @@ func deleteProject(client *http.Client, cfg Config, projectID string) error {
 }
 
 func generateCIToken(client *http.Client, cfg Config, projectID string) (string, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/ci-token", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s/ci-token", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	respBody, err := doJSONRequest(client, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return "", err
@@ -2486,7 +2518,7 @@ func generateCIToken(client *http.Client, cfg Config, projectID string) (string,
 }
 
 func verifyCIToken(client *http.Client, cfg Config, projectID, token string) (bool, error) {
-	endpoint := fmt.Sprintf("%s/v1/projects/%s/ci-token/verify", cfg.BaseURL, url.PathEscape(projectID))
+	endpoint := fmt.Sprintf("%s/projects/%s/ci-token/verify", apiEndpoint(cfg, ""), url.PathEscape(projectID))
 	payload := CiTokenVerifyRequest{Token: strings.TrimSpace(token)}
 	body, err := json.Marshal(payload)
 	if err != nil {
