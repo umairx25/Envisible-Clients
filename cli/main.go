@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	defaultAPIURL       = "https://api.envisible.dev"
-	defaultDashboardURL = "https://envisible.dev"
+	defaultAPIURL       = "https://envisible-518186320084.us-west1.run.app"
+	defaultDashboardURL = "https://envisible.pages.dev"
 	pollWaitTimeout     = 120 * time.Second
 	defaultPollDelay    = 5 * time.Second
 	defaultRepo         = "umairx25/Envisible-Clients"
